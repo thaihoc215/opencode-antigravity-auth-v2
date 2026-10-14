@@ -84,7 +84,6 @@ interface AntigravitySearchResponse {
 export interface SearchArgs {
   query: string;
   urls?: string[];
-  thinking?: boolean;
 }
 
 export interface SearchResult {
@@ -226,7 +225,7 @@ export async function executeSearch(
   projectId: string,
   abortSignal?: AbortSignal,
 ): Promise<string> {
-  const { query, urls, thinking = true } = args;
+  const { query, urls } = args;
 
   // Build prompt with optional URLs
   let prompt = query;
@@ -277,7 +276,6 @@ export async function executeSearch(
   log.debug("Executing search", {
     query,
     urlCount: urls?.length ?? 0,
-    thinking,
   });
 
   try {

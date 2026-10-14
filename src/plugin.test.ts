@@ -27,10 +27,9 @@ const { resetAgySdkCredentialStateForTests } = await import("./plugin/api-key");
 
 const client = {
   tui: { showToast: vi.fn(async () => undefined) },
-  app: { log: vi.fn(async () => undefined) },
 } as unknown as PluginClient;
 
-// provider.models() discovery (exercised by some tests below) populates the
+// models() discovery (exercised by some tests below) populates the
 // module-level live model catalog as a side effect. Reset it after every test
 // so one test's (possibly sparse, mock-driven) discovery fetch can't leak
 // into another test's agy-sdk routing assertions.
@@ -38,8 +37,8 @@ afterEach(() => {
   resetPublicGeminiApiModelCatalogForTests();
 });
 
-describe("createAntigravityPlugin provider models", () => {
-  it("returns runtime-shaped discovered models with static fallback", async () => {
+describe("createAntigravityPlugin models", () => {
+  it("merges discovered models into the static definitions", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
       const url = String(input);
       if (url.includes("generativelanguage.googleapis.com/v1beta/models")) {
@@ -64,37 +63,13 @@ describe("createAntigravityPlugin provider models", () => {
         directory: process.cwd(),
       });
 
-      const models = await plugin.provider?.models?.(
-        {
-          id: "google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-          models: {},
-        },
-        { auth: { type: "api", key: "secret" } },
-      );
+      const models = await plugin.models({ type: "api", key: "secret" });
 
-      expect(models?.["gemini-driver"]).toMatchObject({
-        id: "gemini-driver",
-        providerID: "google",
-        api: {
-          id: "gemini-driver",
-          url: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-        },
+      expect(models["gemini-driver"]).toMatchObject({
+        name: "Gemini Driver (Gemini API)",
         limit: { context: 123, output: 45 },
-        status: "active",
       });
-      expect(models?.["gemini-driver"]?.capabilities).toMatchObject({
-        toolcall: true,
-        input: { text: true, image: true, pdf: true },
-        output: { text: true },
-      });
-      expect(models?.["antigravity-gemini-3.1-pro"]).toMatchObject({
-        id: "antigravity-gemini-3.1-pro",
-        providerID: "google",
-        api: { id: "antigravity-gemini-3.1-pro" },
-      });
+      expect(models["antigravity-gemini-3.1-pro"]).toBeDefined();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -108,7 +83,6 @@ describe("createAntigravityPlugin provider models", () => {
 
     const loader = await plugin.auth.loader(
       async () => ({ type: "api", key: "secret" }),
-      {},
     );
 
     expect(loader).toMatchObject({ apiKey: "" });
@@ -167,12 +141,6 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
 
       const loader = await plugin.auth.loader(
         async () => ({ type: "api", key: "secret" }),
-        {
-          id: "google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-          models: {},
-        },
       );
 
       // Both branches return apiKey: "" — this only confirms loader was constructed.
@@ -230,12 +198,6 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
 
       const loader = await plugin.auth.loader(
         async () => ({ type: "api", key: "secret" }),
-        {
-          id: "google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-          models: {},
-        },
       );
 
       const response = await (loader as { fetch: typeof fetch }).fetch(
@@ -248,6 +210,22 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("never deletes the account pool when no OAuth account is available", async () => {
+    // loadAccounts() also returns null for an unreadable file (a typo from a
+    // hand edit, a lock): the loader must not treat that as "clear the pool".
+    delete process.env.OPENCODE_ANTIGRAVITY_API_KEYS;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(null);
+    vi.mocked(storageModule.clearAccounts).mockClear();
+
+    const plugin = await createAntigravityPlugin("google")({ client, directory: process.cwd() });
+    const loader = await plugin.auth.loader(async () => ({ type: "none" }));
+
+    expect(loader).toEqual({});
+    expect(storageModule.clearAccounts).not.toHaveBeenCalled();
   });
 
   it("uses Gemini CLI when Antigravity soft quota is exhausted", async () => {
@@ -318,12 +296,6 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
           access: "access-token",
           expires: now + 60_000,
         }),
-        {
-          id: "google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-          models: {},
-        },
       );
 
       const response = await (loader as { fetch: typeof fetch }).fetch(
@@ -394,12 +366,6 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
           access: "access-token",
           expires: Date.now() + 60_000,
         }),
-        {
-          id: "google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-          models: {},
-        },
       );
 
       await expect(
@@ -470,8 +436,7 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     const authSetSpy = vi.fn(async () => undefined);
     const localClient = {
       tui: { showToast: vi.fn(async () => undefined) },
-      app: { log: vi.fn(async () => undefined) },
-      auth: { set: authSetSpy },
+        auth: { set: authSetSpy },
     } as unknown as PluginClient;
 
     try {
@@ -482,12 +447,6 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
 
       const loader = await plugin.auth.loader(
         async () => ({ type: "api", key: "secret" }),
-        {
-          id: "google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
-          npm: "@ai-sdk/google",
-          models: {},
-        },
       );
 
       // Drive the OAuth fetch handler through the invalid_grant cleanup path.
@@ -699,17 +658,12 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth, {
-      id: "google",
-      api: "https://generativelanguage.googleapis.com/v1beta",
-      npm: "@ai-sdk/google",
-      models: {},
-    });
+    const loader = await plugin.auth.loader(getAuth);
 
-    // antigravity-gemini-3.5-flash is routable (strips to gemini-3.5-flash which is
+    // antigravity-gemini-3.8-flash is routable (strips to gemini-3.8-flash which is
     // a public API model), so isAgySdkSupportedRequest returns true.
     const requestUrl =
-      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.5-flash:streamGenerateContent?alt=sse";
+      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
 
     const res = await (loader as { fetch: typeof fetch }).fetch(requestUrl, {
       method: "POST",
@@ -763,15 +717,10 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth, {
-      id: "google",
-      api: "https://generativelanguage.googleapis.com/v1beta",
-      npm: "@ai-sdk/google",
-      models: {},
-    });
+    const loader = await plugin.auth.loader(getAuth);
 
     const requestUrl =
-      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.5-flash:streamGenerateContent?alt=sse";
+      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
 
     // Must RESOLVE (not throw) — status 404 because no api-key fallback is available.
     const res = await (loader as { fetch: typeof fetch }).fetch(requestUrl, {
@@ -809,15 +758,10 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth, {
-      id: "google",
-      api: "https://generativelanguage.googleapis.com/v1beta",
-      npm: "@ai-sdk/google",
-      models: {},
-    });
+    const loader = await plugin.auth.loader(getAuth);
 
     const requestUrl =
-      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.5-flash:streamGenerateContent?alt=sse";
+      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
 
     const res = await (loader as { fetch: typeof fetch }).fetch(requestUrl, {
       method: "POST",
@@ -841,8 +785,8 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
 
   it("falls back to agy-sdk on a 403 'permission denied on resource project' from the Antigravity backend", async () => {
     // Some 403s are a project-scoped entitlement gate on the resolved backend
-    // model id (e.g. a staged Google rollout of a new variant like the Gemini
-    // 3.5 Flash "agent"/high-tier backend) rather than a credential problem.
+    // model id (e.g. a staged Google rollout of a new Flash effort tier)
+    // rather than a credential problem.
     // Retrying other Antigravity endpoints can't help, but the public Gemini
     // API can still serve the model — so this specific 403 should fall back
     // just like a 404 does.
@@ -869,15 +813,10 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth, {
-      id: "google",
-      api: "https://generativelanguage.googleapis.com/v1beta",
-      npm: "@ai-sdk/google",
-      models: {},
-    });
+    const loader = await plugin.auth.loader(getAuth);
 
     const requestUrl =
-      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.5-flash:streamGenerateContent?alt=sse";
+      "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
 
     const res = await (loader as { fetch: typeof fetch }).fetch(requestUrl, {
       method: "POST",
@@ -1037,7 +976,6 @@ describe("createAntigravityPlugin capacity-exhaustion header-style fallback (rev
         access: "access-token",
         expires: now + 3_600_000,
       }),
-      { id: "google", api: "https://generativelanguage.googleapis.com/v1beta", npm: "@ai-sdk/google", models: {} },
     );
 
     // Fake timers so the capacity exponential backoffs (1s→2s→4s per endpoint)
@@ -1131,7 +1069,6 @@ describe("createAntigravityPlugin capacity-exhaustion header-style fallback (rev
           access: "access-token",
           expires: now + 3_600_000,
         }),
-        { id: "google", api: "https://generativelanguage.googleapis.com/v1beta", npm: "@ai-sdk/google", models: {} },
       );
 
       vi.useFakeTimers();
@@ -1169,21 +1106,21 @@ describe("createAntigravityPlugin capacity-exhaustion header-style fallback (rev
 });
 
 describe("isRemovedModelId", () => {
-  it("does not filter out the Gemini 3.6 Flash ids", async () => {
+  it("filters the removed Gemini families", async () => {
     const { __testExports } = await import("./plugin");
     for (const id of [
+      "gemini-2.5-pro",
+      "gemini-3-pro",
+      "gemini-3-flash",
+      "gemini-3.1-flash-lite",
+      "gemini-3.5-flash",
+      "antigravity-gemini-3.5-flash-high",
       "gemini-3.6-flash",
-      "antigravity-gemini-3.6-flash",
-      "antigravity-gemini-3.6-flash-high",
-      "gemini-3.6-flash-medium",
+      "antigravity-gemini-3.6-flash-medium",
+      "gemini-3.7-flash",
+      "antigravity-gemini-3.7-flash",
+      "gemini-3.7-flash-low",
     ]) {
-      expect(__testExports.isRemovedModelId(id), `id=${id}`).toBe(false);
-    }
-  });
-
-  it("still filters the removed Gemini families", async () => {
-    const { __testExports } = await import("./plugin");
-    for (const id of ["gemini-2.5-pro", "gemini-3-pro", "gemini-3-flash", "gemini-3.1-flash-lite"]) {
       expect(__testExports.isRemovedModelId(id), `id=${id}`).toBe(true);
     }
   });
@@ -1203,43 +1140,15 @@ describe("Gemini 3.8 Flash model surface", () => {
   });
 
   it("advertises video and audio input for 3.8 Flash", async () => {
-    const { __testExports } = await import("./plugin");
     const { OPENCODE_MODEL_DEFINITIONS } = await import("./plugin/config/models");
+    const { toV2Model } = await import("./v2/models");
 
-    const capabilities = __testExports.modalitiesToCapabilities(
+    const model = toV2Model(
+      "antigravity-gemini-3.8-flash",
       OPENCODE_MODEL_DEFINITIONS["antigravity-gemini-3.8-flash"]!,
-      undefined,
-    ) as { input: Record<string, boolean> };
+    );
 
-    expect(capabilities.input.video).toBe(true);
-    expect(capabilities.input.audio).toBe(true);
-  });
-});
-
-describe("Gemini 3.7 Flash model surface", () => {
-  it("does not filter out the Gemini 3.7 Flash ids", async () => {
-    const { __testExports } = await import("./plugin");
-    for (const id of [
-      "gemini-3.7-flash",
-      "antigravity-gemini-3.7-flash",
-      "antigravity-gemini-3.7-flash-high",
-      "gemini-3.7-flash-medium",
-    ]) {
-      expect(__testExports.isRemovedModelId(id), `id=${id}`).toBe(false);
-    }
-  });
-
-  it("advertises video and audio input for 3.7 Flash", async () => {
-    const { __testExports } = await import("./plugin");
-    const { OPENCODE_MODEL_DEFINITIONS } = await import("./plugin/config/models");
-
-    const capabilities = __testExports.modalitiesToCapabilities(
-      OPENCODE_MODEL_DEFINITIONS["antigravity-gemini-3.7-flash"]!,
-      undefined,
-    ) as { input: Record<string, boolean> };
-
-    expect(capabilities.input.video).toBe(true);
-    expect(capabilities.input.audio).toBe(true);
+    expect(model.capabilities.input).toEqual(expect.arrayContaining(["video", "audio"]));
   });
 });
 

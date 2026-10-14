@@ -22,16 +22,6 @@ export const AccountSelectionStrategySchema = z.enum(['sticky', 'round-robin', '
 export type AccountSelectionStrategy = z.infer<typeof AccountSelectionStrategySchema>;
 
 /**
- * Toast notification scope for controlling which sessions show toasts.
- * 
- * - `root_only` (default): Only show toasts for root sessions (no parentID).
- *   Subagents and background tasks won't show toast notifications.
- * - `all`: Show toasts for all sessions including subagents and background tasks.
- */
-export const ToastScopeSchema = z.enum(['root_only', 'all']);
-export type ToastScope = z.infer<typeof ToastScopeSchema>;
-
-/**
  * Scheduling mode for rate limit behavior.
  * 
  * - `cache_first`: Wait for same account to recover (preserves prompt cache). Default.
@@ -106,24 +96,10 @@ export const AntigravityConfigSchema = z.object({
   
   /** 
    * Suppress most toast notifications (rate limit, account switching, etc.)
-   * Recovery toasts are always shown regardless of this setting.
    * Env override: OPENCODE_ANTIGRAVITY_QUIET=1
    * @default false
    */
   quiet_mode: z.boolean().default(false),
-  
-  /**
-   * Control which sessions show toast notifications.
-   * 
-   * - `root_only` (default): Only root sessions show toasts.
-   *   Subagents and background tasks will be silent (less spam).
-   * - `all`: All sessions show toasts including subagents and background tasks.
-   * 
-   * Debug logging captures all toasts regardless of this setting.
-   * Env override: OPENCODE_ANTIGRAVITY_TOAST_SCOPE=all
-   * @default "root_only"
-   */
-  toast_scope: ToastScopeSchema.default('root_only'),
   
   /**
    * Enable debug logging to file.
@@ -133,8 +109,8 @@ export const AntigravityConfigSchema = z.object({
   debug: z.boolean().default(false),
 
   /**
-   * Show debug logs in the TUI log panel.
-   * Works independently from `debug` file logging.
+   * Add the request's debug lines to the model's thinking output and to
+   * Antigravity error messages. Works independently from `debug` file logging.
    * Env override: OPENCODE_ANTIGRAVITY_DEBUG_TUI=1
    * @default false
    */
@@ -161,37 +137,6 @@ export const AntigravityConfigSchema = z.object({
    * @default false
    */
   keep_thinking: z.boolean().default(false),
-  
-  // =========================================================================
-  // Session Recovery
-  // =========================================================================
-  
-  /**
-   * Enable automatic session recovery from tool_result_missing errors.
-   * When enabled, shows a toast notification when recoverable errors occur.
-   * 
-   * @default true
-   */
-  session_recovery: z.boolean().default(true),
-  
-  /**
-   * Automatically send a "continue" prompt after successful recovery.
-   * Only applies when session_recovery is enabled.
-   * 
-   * When false: Only shows toast notification, user must manually continue.
-   * When true: Automatically sends "continue" to resume the session.
-   * 
-   * @default false
-   */
-  auto_resume: z.boolean().default(false),
-  
-  /**
-   * Custom text to send when auto-resuming after recovery.
-   * Only used when auto_resume is enabled.
-   * 
-   * @default "continue"
-   */
-  resume_text: z.string().default("continue"),
   
   // =========================================================================
   // Signature Caching
@@ -221,19 +166,6 @@ export const AntigravityConfigSchema = z.object({
    * @default 2000
    */
   empty_response_retry_delay_ms: z.number().min(500).max(10000).default(2000),
-  
-  // =========================================================================
-  // Tool ID Recovery (ported from LLM-API-Key-Proxy)
-  // =========================================================================
-  
-  /**
-   * Enable tool ID orphan recovery.
-   * When tool responses have mismatched IDs (due to context compaction),
-   * attempt to match them by function name or create placeholders.
-   * 
-   * @default true
-   */
-  tool_id_recovery: z.boolean().default(true),
   
   // =========================================================================
   // Tool Hallucination Prevention (ported from LLM-API-Key-Proxy)
@@ -303,15 +235,6 @@ export const AntigravityConfigSchema = z.object({
    */
   max_rate_limit_wait_seconds: z.number().min(0).max(3600).default(300),
   
-  /**
-   * @deprecated Kept only for backward compatibility.
-   * This flag is ignored at runtime.
-   * Gemini requests always fall back between Antigravity and Gemini CLI quotas.
-   *
-   * @default false
-   */
-  quota_fallback: z.boolean().default(false),
-
   /**
    * Prefer gemini-cli routing before Antigravity for Gemini models.
    * 
@@ -416,14 +339,6 @@ export const AntigravityConfigSchema = z.object({
    default_retry_after_seconds: z.number().min(1).max(300).default(60),
    
    /**
-    * Maximum backoff delay in seconds for exponential retry.
-    * This caps how long the exponential backoff can grow.
-    * 
-    * @default 60
-    */
-   max_backoff_seconds: z.number().min(5).max(300).default(60),
-   
-   /**
     * Maximum random delay in milliseconds before each API request.
     * Adds timing jitter to break predictable request cadence patterns.
     * Set to 0 to disable request jitter.
@@ -489,17 +404,6 @@ export const AntigravityConfigSchema = z.object({
      regeneration_rate_per_minute: z.number().min(0.1).max(60).default(6),
      initial_tokens: z.number().min(1).max(1000).default(50),
    }).optional(),
-   
-   // =========================================================================
-   // Auto-Update
-  // =========================================================================
-  
-  /**
-   * Enable automatic plugin updates.
-   * @default true
-   */
-  auto_update: z.boolean().default(true),
-
 });
 
 export type AntigravityConfig = z.infer<typeof AntigravityConfigSchema>;
@@ -510,23 +414,17 @@ export type SignatureCacheConfig = z.infer<typeof SignatureCacheConfigSchema>;
  */
 export const DEFAULT_CONFIG: AntigravityConfig = {
   quiet_mode: false,
-  toast_scope: 'root_only',
   debug: false,
   debug_tui: false,
   keep_thinking: false,
-  session_recovery: true,
-  auto_resume: true,
-  resume_text: "continue",
   empty_response_max_attempts: 4,
   empty_response_retry_delay_ms: 2000,
-  tool_id_recovery: true,
   claude_tool_hardening: true,
   claude_prompt_auto_caching: false,
   proactive_token_refresh: true,
   proactive_refresh_buffer_seconds: 1800,
   proactive_refresh_check_interval_seconds: 300,
   max_rate_limit_wait_seconds: 300,
-  quota_fallback: false,
   cli_first: false,
   agy_sdk: {
     enabled: true,
@@ -546,12 +444,10 @@ export const DEFAULT_CONFIG: AntigravityConfig = {
   max_cache_first_wait_seconds: 60,
   failure_ttl_seconds: 3600,
   default_retry_after_seconds: 60,
-  max_backoff_seconds: 60,
   request_jitter_max_ms: 0,
   soft_quota_threshold_percent: 90,
   quota_refresh_interval_minutes: 15,
   soft_quota_cache_ttl_minutes: "auto",
-  auto_update: true,
   signature_cache: {
     enabled: true,
     memory_ttl_seconds: 3600,

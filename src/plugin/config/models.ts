@@ -54,20 +54,18 @@ const DEFAULT_MODALITIES: ModelModalities = {
 };
 
 /**
- * Gemini 3.7 Flash documents Text/Image/Video/Audio/PDF input — wider than
+ * Gemini 3.8 Flash accepts Text/Image/Video/Audio/PDF input — wider than
  * DEFAULT_MODALITIES. The Antigravity catalog agrees: its Flash entries carry
  * `supportsVideo: true` and audio mime types in `supportedMimeTypes`.
  *
- * Built fresh per model entry rather than shared: `normalizeProviderHookModels`
- * shallow-copies these objects into the provider payload, so two entries sharing
- * one `input` array would alias each other for any consumer that mutates it.
+ * Built fresh per model entry so two entries never share one mutable array.
  */
-const flash37Modalities = (): ModelModalities => ({
+const flashModalities = (): ModelModalities => ({
   input: ["text", "image", "pdf", "video", "audio"],
   output: ["text"],
 });
 
-const flash37Variants = (): Record<string, ModelVariant> => ({
+const flashVariants = (): Record<string, ModelVariant> => ({
   low: { thinkingLevel: "low" },
   medium: { thinkingLevel: "medium" },
   high: { thinkingLevel: "high" },
@@ -83,42 +81,13 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
       high: { thinkingLevel: "high" },
     },
   },
-  "antigravity-gemini-3.5-flash": {
-    name: "Gemini 3.5 Flash (Antigravity)",
-    limit: { context: 1048576, output: 65536 },
-    modalities: DEFAULT_MODALITIES,
-    variants: {
-      minimal: { thinkingLevel: "minimal" },
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" },
-    },
-  },
-  // Gemini 3.6 Flash serves low/medium/high only — no `minimal` tier, unlike 3.5 Flash.
-  "antigravity-gemini-3.6-flash": {
-    name: "Gemini 3.6 Flash (Antigravity)",
-    limit: { context: 1048576, output: 65536 },
-    modalities: DEFAULT_MODALITIES,
-    variants: {
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" },
-    },
-  },
-  // Gemini 3.7 Flash serves low/medium/high only — same tier set as 3.6.
-  "antigravity-gemini-3.7-flash": {
-    name: "Gemini 3.7 Flash (Antigravity)",
-    limit: { context: 1048576, output: 65536 },
-    modalities: flash37Modalities(),
-    variants: flash37Variants(),
-  },
-  // Gemini 3.8 Flash: same tier set, limits and input modalities as 3.7 in the
+  // Gemini 3.8 Flash serves low/medium/high only (no `minimal`) in the
   // Antigravity catalog (fetchAvailableModels, 2026-10-14).
   "antigravity-gemini-3.8-flash": {
     name: "Gemini 3.8 Flash (Antigravity)",
     limit: { context: 1048576, output: 65536 },
-    modalities: flash37Modalities(),
-    variants: flash37Variants(),
+    modalities: flashModalities(),
+    variants: flashVariants(),
   },
   "antigravity-claude-sonnet-4-6": {
     name: "Claude Sonnet 4.6 (Antigravity)",
@@ -134,32 +103,11 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
       max: { thinkingConfig: { thinkingBudget: 32768 } },
     },
   },
-  "gemini-3.5-flash": {
-    name: "Gemini 3.5 Flash (Gemini CLI)",
-    limit: { context: 1048576, output: 65536 },
-    modalities: DEFAULT_MODALITIES,
-  },
-  "gemini-3.6-flash": {
-    name: "Gemini 3.6 Flash (Gemini CLI)",
-    limit: { context: 1048576, output: 65536 },
-    modalities: DEFAULT_MODALITIES,
-    variants: {
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" },
-    },
-  },
-  "gemini-3.7-flash": {
-    name: "Gemini 3.7 Flash (Gemini CLI)",
-    limit: { context: 1048576, output: 65536 },
-    modalities: flash37Modalities(),
-    variants: flash37Variants(),
-  },
   "gemini-3.8-flash": {
     name: "Gemini 3.8 Flash (Gemini CLI)",
     limit: { context: 1048576, output: 65536 },
-    modalities: flash37Modalities(),
-    variants: flash37Variants(),
+    modalities: flashModalities(),
+    variants: flashVariants(),
   },
   "gemini-3.1-pro": {
     name: "Gemini 3.1 Pro (Gemini CLI)",

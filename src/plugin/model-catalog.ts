@@ -4,8 +4,8 @@
  * `fetchGeminiApiModels` call already made for `provider.models()` discovery.
  *
  * This is the documented, stable, Google-maintained model registry — unlike
- * the Antigravity Code Assist internal backend ids (`gemini-3-flash-agent`,
- * `gemini-pro-agent`, ...), which are reverse-engineered and have repeatedly
+ * the Antigravity Code Assist internal backend ids (`gemini-pro-agent`,
+ * `gemini-3.8-flash-high`, ...), which are reverse-engineered and have repeatedly
  * drifted (multiple upstream PRs have each guessed differently at the right
  * id). Routing decisions that ask "does the public API actually serve this
  * model id" should prefer this live data over a hardcoded allow/deny list,

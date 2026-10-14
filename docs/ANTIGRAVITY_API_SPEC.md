@@ -213,7 +213,7 @@ Gemini models support Google Search grounding, but **it cannot be combined with 
 
 #### How the `google_search` Tool Works
 
-The model can call `google_search(query, urls?, thinking?)` which:
+The model can call `google_search(query, urls?)` which:
 1. Makes a **separate API call** to Antigravity with only `{ googleSearch: {} }` (no function declarations)
 2. Parses the `groundingMetadata` from the response
 3. Returns formatted markdown with sources and citations
@@ -223,7 +223,6 @@ The model can call `google_search(query, urls?, thinking?)` which:
 |-----------|------|----------|-------------|
 | `query` | string | ✅ | The search query or question |
 | `urls` | string[] | ❌ | URLs to analyze (adds `urlContext` tool) |
-| `thinking` | boolean | ❌ | Enable deep thinking (default: true) |
 
 **Example Response:**
 ```markdown

@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   analyzeConversationState,
   closeToolLoopForThinking,
-  hasPossibleCompactedThinking,
-  looksLikeCompactedThinkingTurn,
   needsThinkingRecovery,
 } from "./thinking-recovery";
 
@@ -234,88 +232,5 @@ describe("closeToolLoopForThinking", () => {
     const original = JSON.stringify(contents);
     closeToolLoopForThinking(contents);
     expect(JSON.stringify(contents)).toBe(original);
-  });
-});
-
-// ─── looksLikeCompactedThinkingTurn ──────────────────────────────────────────
-
-describe("looksLikeCompactedThinkingTurn", () => {
-  it("returns false for null / undefined", () => {
-    expect(looksLikeCompactedThinkingTurn(null)).toBe(false);
-    expect(looksLikeCompactedThinkingTurn(undefined)).toBe(false);
-  });
-
-  it("returns false for message with no parts", () => {
-    expect(looksLikeCompactedThinkingTurn({ role: "model", parts: [] })).toBe(false);
-  });
-
-  it("returns false for message without function calls", () => {
-    expect(looksLikeCompactedThinkingTurn(modelMsg("just text"))).toBe(false);
-  });
-
-  it("returns false when message has thinking blocks alongside function call", () => {
-    const msg = {
-      role: "model",
-      parts: [
-        { thought: true, text: "thinking" },
-        { functionCall: { name: "t", args: {} } },
-      ],
-    };
-    expect(looksLikeCompactedThinkingTurn(msg)).toBe(false);
-  });
-
-  it("returns false when text appears before function call (non-compacted)", () => {
-    const msg = {
-      role: "model",
-      parts: [
-        { text: "I will now call the tool." },
-        { functionCall: { name: "t", args: {} } },
-      ],
-    };
-    expect(looksLikeCompactedThinkingTurn(msg)).toBe(false);
-  });
-
-  it("returns true for bare function call with no preceding text (looks compacted)", () => {
-    const msg = modelWithToolCall("search");
-    expect(looksLikeCompactedThinkingTurn(msg)).toBe(true);
-  });
-});
-
-// ─── hasPossibleCompactedThinking ────────────────────────────────────────────
-
-describe("hasPossibleCompactedThinking", () => {
-  it("returns false for empty contents", () => {
-    expect(hasPossibleCompactedThinking([], 0)).toBe(false);
-  });
-
-  it("returns false for invalid turnStartIdx", () => {
-    expect(hasPossibleCompactedThinking([modelMsg("hi")], -1)).toBe(false);
-  });
-
-  it("returns false when no model messages look compacted", () => {
-    const contents = [userMsg("go"), modelWithThinkingAndToolCall(), toolResultMsg()];
-    expect(hasPossibleCompactedThinking(contents, 1)).toBe(false);
-  });
-
-  it("returns true when a model message in turn looks compacted", () => {
-    const contents = [
-      userMsg("go"),
-      modelWithToolCall("search"),
-      toolResultMsg("search"),
-    ];
-    expect(hasPossibleCompactedThinking(contents, 1)).toBe(true);
-  });
-
-  it("ignores model messages before turnStartIdx", () => {
-    const contents = [
-      userMsg("first turn"),
-      modelWithToolCall("old"),
-      toolResultMsg("old"),
-      userMsg("second turn"),
-      modelWithThinkingAndToolCall("new"),
-      toolResultMsg("new"),
-    ];
-    // turnStart is 4 (second model message)
-    expect(hasPossibleCompactedThinking(contents, 4)).toBe(false);
   });
 });

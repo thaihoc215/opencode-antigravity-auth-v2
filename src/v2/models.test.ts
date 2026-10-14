@@ -43,19 +43,6 @@ describe("toV2Model", () => {
     });
   });
 
-  it("reads modalities from the core's normalized V1 capability flags", () => {
-    const patch = toV2Model("discovered", {
-      name: "Discovered",
-      limit: { context: 1000, output: 100 },
-      capabilities: {
-        toolcall: true,
-        input: { text: true, image: true, audio: false },
-        output: { text: true },
-      },
-    });
-    expect(patch.capabilities).toEqual({ tools: true, input: ["text", "image"], output: ["text"] });
-  });
-
   it("falls back to the id and text-only modalities", () => {
     const patch = toV2Model("bare", {});
     expect(patch.name).toBe("bare");

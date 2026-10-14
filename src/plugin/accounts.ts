@@ -21,11 +21,6 @@ export type RateLimitReason =
   | "SERVER_ERROR"
   | "UNKNOWN";
 
-export interface RateLimitBackoffResult {
-  backoffMs: number;
-  reason: RateLimitReason;
-}
-
 const QUOTA_EXHAUSTED_BACKOFFS = [60_000, 300_000, 1_800_000, 7_200_000] as const;
 const RATE_LIMIT_EXCEEDED_BACKOFF = 30_000;
 // Increased from 15s to 45s base + jitter to reduce retry pressure on capacity errors

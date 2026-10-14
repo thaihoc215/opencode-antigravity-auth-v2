@@ -121,7 +121,7 @@ const server: Plugin.Plugin = {
     // calling through `antigravityFetch`, which always uses the latest loader.
     let loader: Promise<LoaderResult | Record<string, unknown>> | undefined;
     const load = () => {
-      loader ??= core.auth.loader(getAuth, { id: PROVIDER_ID, models: {} }).catch((error) => {
+      loader ??= core.auth.loader(getAuth).catch((error) => {
         loader = undefined;
         throw error;
       });
@@ -135,8 +135,8 @@ const server: Plugin.Plugin = {
 
     const discoverModels = async () => {
       try {
-        const models = await core.provider?.models?.({ id: PROVIDER_ID, models: {} }, { auth: await getAuth() });
-        if (models && Object.keys(models).length > 0) {
+        const models = await core.models(await getAuth());
+        if (Object.keys(models).length > 0) {
           modelDefinitions = models;
           await ctx.provider.reload();
         }
@@ -249,19 +249,17 @@ const server: Plugin.Plugin = {
       });
     });
 
-    const search = core.tool?.google_search;
-    if (search) {
-      await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "google_search",
-          description: search.description,
-          input: search.input,
-          execute: async (input, context) => ({
-            content: await search.execute(input as GoogleSearchArgs, context.signal),
-          }),
-        });
+    const search = core.tool.google_search;
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "google_search",
+        description: search.description,
+        input: search.input,
+        execute: async (input, context) => ({
+          content: await search.execute(input as GoogleSearchArgs, context.signal),
+        }),
       });
-    }
+    });
 
     // A sign-in changes the pool on disk: refresh the provider activation and
     // the form's account list, and rebuild the account manager.

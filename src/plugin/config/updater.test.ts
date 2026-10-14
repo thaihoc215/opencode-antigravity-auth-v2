@@ -89,7 +89,7 @@ describe("updateOpencodeConfig", () => {
           apiKey: "test-key",
           models: {
             "antigravity-gemini-3.1-pro": { name: "Gemini 3.1 Pro (Antigravity)" },
-            "gemini-3.7-flash": { name: "Gemini 3.7 Flash (Gemini CLI)" },
+            "gemini-3.8-flash": { name: "Gemini 3.8 Flash (Gemini CLI)" },
             "my-tuned-model": { name: "Mine" },
           },
         },

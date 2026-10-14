@@ -22,13 +22,6 @@ const consoleClient: PluginClient = {
   // The account pool on disk is the source of truth; there is no OpenCode
   // credential store to update from a standalone process.
   auth: { async set() {} },
-  session: {
-    async prompt() {},
-    async abort() {},
-    async messages() {
-      return { data: [] };
-    },
-  },
 };
 
 const HELP = `Antigravity account manager
@@ -76,15 +69,8 @@ async function main(): Promise<number> {
     client: consoleClient,
     directory: process.cwd(),
   });
-  const method = core.auth.methods.find((entry) => entry.type === "oauth" && entry.authorize);
-  if (!method?.authorize) {
-    console.error("Antigravity OAuth is unavailable.");
-    return 1;
-  }
-
   const noBrowser = process.argv.includes("--no-browser");
-  // Passing inputs selects the interactive (terminal) flow.
-  const authorization = await method.authorize(noBrowser ? { noBrowser: "true" } : {});
+  const authorization = await core.auth.login(noBrowser ? { noBrowser: "true" } : {});
   if (authorization.method !== "auto") {
     console.error("Unexpected authorization mode.");
     return 1;

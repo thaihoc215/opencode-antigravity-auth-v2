@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AccountManager, type ModelFamily, type HeaderStyle } from "./accounts";
+import { AccountManager } from "./accounts";
 import type { AccountStorageV4 } from "./storage";
 
 /**

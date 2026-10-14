@@ -991,13 +991,6 @@ function applyClaudeThinkingSanitization(
   }
 }
 
-/**
- * Gets the stable session ID for this plugin instance.
- */
-export function getPluginSessionId(): string {
-  return PLUGIN_SESSION_ID;
-}
-
 function generateSyntheticProjectId(): string {
   const adjectives = ["useful", "bright", "swift", "calm", "bold"];
   const nouns = ["fuze", "wave", "spark", "flow", "core"];
