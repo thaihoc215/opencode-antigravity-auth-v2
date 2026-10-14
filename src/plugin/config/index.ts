@@ -5,19 +5,17 @@
  * ```typescript
  * import { loadConfig, type AntigravityConfig } from "./config";
  * 
- * const config = loadConfig(directory);
- * if (config.keep_thinking) {
- *   // Preserve thinking blocks
+ * const config = loadConfig(directory, options);
+ * if (config.debug) {
+ *   // ...
  * }
  * ```
  */
 
 export {
   AntigravityConfigSchema,
-  SignatureCacheConfigSchema,
   DEFAULT_CONFIG,
   type AntigravityConfig,
-  type SignatureCacheConfig,
 } from "./schema";
 
 export {
@@ -26,6 +24,4 @@ export {
   getProjectConfigPath,
   getDefaultLogsDir,
   configExists,
-  initRuntimeConfig,
-  getKeepThinking,
 } from "./loader";

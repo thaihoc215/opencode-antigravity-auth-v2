@@ -8,8 +8,12 @@ vi.mock("../plugin/storage", async (importOriginal) => {
     saveAccounts: vi.fn(async () => undefined),
     saveAccountsReplace: vi.fn(async () => undefined),
     removeAccountFromStorage: vi.fn(async () => undefined),
-    clearAccounts: vi.fn(async () => undefined),
   };
+});
+
+vi.mock("../plugin/account-pool", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../plugin/account-pool")>();
+  return { ...original, watchAccountPoolFile: vi.fn(() => () => {}) };
 });
 
 vi.mock("../plugin/version", () => ({
@@ -20,6 +24,14 @@ const { default: plugin, cliCommand, OAUTH_METHOD_ID, PLUGIN_ID, sdkPackage, toV
   "./plugin"
 );
 const storageModule = await import("../plugin/storage");
+const accountPoolModule = await import("../plugin/account-pool");
+
+/** The pool-file listener the plugin registered (the account manager CLI saved). */
+function poolFileChanged(): void {
+  const listener = vi.mocked(accountPoolModule.watchAccountPoolFile).mock.calls.at(-1)?.[0];
+  if (!listener) throw new Error("no pool file listener");
+  listener();
+}
 
 type Callback = (input: any) => unknown;
 
@@ -491,5 +503,132 @@ describe("auth from antigravity-accounts.json", () => {
 
     expect(provider.activation).toBe("enabled");
     await (cleanup as () => void)();
+  });
+});
+
+/** An event stream the test feeds; each subscribe() returns the next one. */
+function controllableEvents(ctx: ReturnType<typeof createFakeContext>["ctx"]) {
+  const streams: Array<{ push(event: unknown): void; end(): void }> = [];
+  ctx.event.subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => {
+    const queue: unknown[] = [];
+    let wake: (() => void) | undefined;
+    let ended = false;
+    const stream = {
+      push(event: unknown) {
+        queue.push(event);
+        wake?.();
+      },
+      end() {
+        ended = true;
+        wake?.();
+      },
+    };
+    signal.addEventListener("abort", () => stream.end());
+    streams.push(stream);
+    return {
+      async *[Symbol.asyncIterator]() {
+        while (true) {
+          if (queue.length > 0) {
+            yield queue.shift();
+            continue;
+          }
+          if (ended) return;
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+        }
+      },
+    };
+  }) as never;
+  return streams;
+}
+
+describe("V2 credential changes", () => {
+  it("ignores credential events that change neither the google credential nor the pool", async () => {
+    const fake = createFakeContext();
+    const streams = controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+
+    streams[0]!.push({ type: "credential.updated" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(fake.ctx.integration.reload).not.toHaveBeenCalled();
+    await (cleanup as () => Promise<void>)();
+  });
+
+  it("rebuilds once after a burst of events when the google credential changed", async () => {
+    const fake = createFakeContext();
+    const streams = controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1));
+
+    fake.ctx.integration.connection.active.mockResolvedValue({ id: "conn" } as never);
+    fake.ctx.integration.connection.resolve.mockResolvedValue({
+      type: "oauth",
+      refresh: "new-refresh",
+      access: "a",
+      expires: Date.now() + 3_600_000,
+    } as never);
+    streams[0]!.push({ type: "credential.updated" });
+    streams[0]!.push({ type: "credential.switched" });
+
+    await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(2));
+    await (cleanup as () => Promise<void>)();
+  });
+
+  it("reloads only the sign-in form when the account manager edits a non-empty pool", async () => {
+    const stored = (enabled: boolean) => ({
+      version: 4 as const,
+      accounts: [{ email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 0, enabled }],
+      activeIndex: 0,
+    });
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(stored(true));
+    const fake = createFakeContext();
+    controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1));
+
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(stored(false));
+    poolFileChanged();
+
+    await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1);
+    await (cleanup as () => Promise<void>)();
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(null);
+  });
+
+  it("rebuilds when the account manager adds the first account", async () => {
+    const fake = createFakeContext();
+    controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1));
+
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [{ email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 0 }],
+      activeIndex: 0,
+    });
+    poolFileChanged();
+
+    await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(2));
+    await (cleanup as () => Promise<void>)();
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(null);
+  });
+
+  it("subscribes again when the event stream ends", async () => {
+    const fake = createFakeContext();
+    const streams = controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+
+    streams[0]!.end();
+
+    await vi.waitFor(() => expect(streams).toHaveLength(2), { timeout: 3000 });
+    await (cleanup as () => Promise<void>)();
   });
 });

@@ -3,19 +3,18 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { AntigravityTokenExchangeResult } from "../antigravity/oauth";
 import { ANTIGRAVITY_PROVIDER_ID } from "../constants";
 import { fileURLToPath } from "node:url";
-import {
-  createAntigravityPlugin,
-  createBrowserOAuthAuthorization,
-  isRemovedModelId,
-  replaceStoredAccount,
-} from "../plugin";
+import { createAntigravityCore, isRemovedModelId } from "../plugin";
+import { isOAuthAuth, parseRefreshParts } from "../plugin/auth";
 import { OPENCODE_MODEL_DEFINITIONS } from "../plugin/config/models";
+import { watchAccountPoolFile } from "../plugin/account-pool";
 import { createLogger } from "../plugin/logger";
-import { loadAccounts } from "../plugin/storage";
+import { createBrowserOAuthAuthorization, replaceStoredAccount } from "../plugin/oauth-flow";
+import { hashRefreshToken, loadAccounts } from "../plugin/storage";
 import { refreshAccessToken } from "../plugin/token";
 import type {
+  AntigravityRoute,
+  AuthDetails,
   GoogleSearchArgs,
-  LoaderResult,
   OAuthAuthorizationResult,
   ProviderModel,
 } from "../plugin/types";
@@ -27,13 +26,17 @@ import {
   summarizeAccounts,
   type PoolAccountSummary,
 } from "./actions";
-import { createV2Client, createV2GetAuth } from "./host";
+import { createV2GetAuth, createV2RevokedReporter } from "./host";
 import { applyV2Model, toV2Model } from "./models";
 
 export const PLUGIN_ID = "opencode-antigravity-auth";
 export const OAUTH_METHOD_ID = "antigravity";
 const OAUTH_METHOD_LABEL = "OAuth with Google (Antigravity)";
 const PROVIDER_ID = ANTIGRAVITY_PROVIDER_ID;
+
+/** Credential events and pool writes often come in bursts (sign-in, then token storage). */
+const CREDENTIAL_EVENT_DEBOUNCE_MS = 300;
+const MAX_RESUBSCRIBE_DELAY_MS = 30_000;
 
 const log = createLogger("v2");
 
@@ -46,10 +49,6 @@ type FetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respons
 export function sdkPackage(moduleUrl: string = import.meta.url): string {
   const file = moduleUrl.endsWith(".ts") ? "./sdk.ts" : "./sdk.js";
   return `aisdk:${new URL(file, moduleUrl).href}`;
-}
-
-function hasFetch(result: LoaderResult | Record<string, unknown>): result is LoaderResult {
-  return typeof (result as Partial<LoaderResult>).fetch === "function";
 }
 
 /** Command that runs the account manager CLI shipped next to this module. */
@@ -65,6 +64,20 @@ async function loadPool(): Promise<PoolAccountSummary[]> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Identifies the active google credential, which the loader depends on.
+ * Tokens are hashed; the key never leaves this process.
+ */
+function credentialKey(auth: AuthDetails): string {
+  if (isOAuthAuth(auth)) {
+    return `oauth:${hashRefreshToken(parseRefreshParts(auth.refresh).refreshToken)}`;
+  }
+  if (typeof auth.key === "string") {
+    return `${auth.type}:${hashRefreshToken(auth.key)}`;
+  }
+  return auth.type;
 }
 
 function toCredential(result: AntigravityTokenExchangeResult): Credential.OAuth {
@@ -83,10 +96,12 @@ function toCredential(result: AntigravityTokenExchangeResult): Credential.OAuth 
 
 /** Converts the core's OAuth authorization into the V2 integration shape. */
 export function toV2Authorization(result: OAuthAuthorizationResult) {
+  const expiresAt = result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {};
   if (result.method === "auto") {
     return {
       url: result.url,
       instructions: result.instructions,
+      ...expiresAt,
       mode: "auto" as const,
       callback: result.callback().then(toCredential),
     };
@@ -94,20 +109,33 @@ export function toV2Authorization(result: OAuthAuthorizationResult) {
   return {
     url: result.url,
     instructions: result.instructions,
+    ...expiresAt,
     mode: "code" as const,
     callback: (code: string) => result.callback(code).then(toCredential),
   };
 }
 
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 const server: Plugin.Plugin = {
   id: PLUGIN_ID,
   async setup(ctx) {
-    const client = createV2Client(ctx, PROVIDER_ID);
     const getAuth = createV2GetAuth(ctx, PROVIDER_ID);
-    const core = await createAntigravityPlugin(PROVIDER_ID)({
-      client,
+    const core = await createAntigravityCore({
       directory: ctx.location.directory,
       options: ctx.options,
+      getAuth,
+      onAccountsRevoked: createV2RevokedReporter(ctx, PROVIDER_ID),
     });
     const packageName = sdkPackage();
 
@@ -115,34 +143,44 @@ const server: Plugin.Plugin = {
     // background and applied with ctx.provider.reload().
     let pool = await loadPool();
     let modelDefinitions: Record<string, ProviderModel> = OPENCODE_MODEL_DEFINITIONS;
+    let lastCredentialKey = credentialKey(await getAuth().catch(() => ({ type: "none" })));
+    let lastPoolKey = JSON.stringify(pool);
 
-    // The core loader builds the account pool and the Antigravity fetch. It runs
-    // once and again after credentials change; SDKs cached by OpenCode keep
-    // calling through `antigravityFetch`, which always uses the latest loader.
-    let loader: Promise<LoaderResult | Record<string, unknown>> | undefined;
+    // The core's route (account pool + Antigravity fetch). It is built on first
+    // use and again after credentials change; SDKs cached by OpenCode keep
+    // calling through `antigravityFetch`, which always uses the latest route.
+    let route: Promise<AntigravityRoute | undefined> | undefined;
     const load = () => {
-      loader ??= core.auth.loader(getAuth).catch((error) => {
-        loader = undefined;
+      route ??= core.loader().catch((error) => {
+        route = undefined;
         throw error;
       });
-      return loader;
+      return route;
+    };
+    /** Drops the current route; the replaced one stops its timers and saves. */
+    const resetRoute = async () => {
+      const previous = route;
+      route = undefined;
+      const loaded = await previous?.catch(() => undefined);
+      await loaded?.dispose();
     };
     const antigravityFetch = (hostFetch: FetchFn): FetchFn => async (input, init) => {
       const loaded = await load();
-      if (!hasFetch(loaded)) return hostFetch(input, init);
+      if (!loaded) return hostFetch(input, init);
       return loaded.fetch(input instanceof URL ? input.toString() : input, init);
     };
 
-    const discoverModels = async () => {
+    /** Refreshes model definitions, then reloads the provider (activation may have changed too). */
+    const refreshProvider = async () => {
       try {
-        const models = await core.models(await getAuth());
+        const models = await core.models();
         if (Object.keys(models).length > 0) {
           modelDefinitions = models;
-          await ctx.provider.reload();
         }
       } catch (error) {
         log.debug("model-discovery-failed", { error: error instanceof Error ? error.message : String(error) });
       }
+      await ctx.provider.reload();
     };
 
     await ctx.provider.transform((editor) => {
@@ -180,9 +218,9 @@ const server: Plugin.Plugin = {
           ...(typeof event.options.name === "string" ? { name: event.options.name } : {}),
           ...(event.options.headers ? { headers: event.options.headers } : {}),
           ...(typeof event.options.baseURL === "string" ? { baseURL: event.options.baseURL } : {}),
-          // OAuth requests are authenticated by the Antigravity fetch; the key is
-          // only used on the plain Gemini API path.
-          apiKey: hasFetch(loaded) ? loaded.apiKey : (event.options.apiKey ?? ""),
+          // Requests routed by the core are authenticated there; the host's key
+          // is only used when there is nothing to route with.
+          apiKey: loaded ? "" : (event.options.apiKey ?? ""),
           fetch: antigravityFetch(hostFetch),
         });
       },
@@ -199,15 +237,15 @@ const server: Plugin.Plugin = {
           label: OAUTH_METHOD_LABEL,
           form: [buildActionField(pool, cliCommand())],
         },
-        // Both actions use the core's non-interactive browser flow. Interactive
+        // Both actions use the non-interactive browser flow. Interactive
         // account management (delete, enable/disable, quotas) lives in the CLI.
         authorize: async (answer) => {
           const action = parseLoginAction(answer, pool);
           if (action.type === "add") {
-            return toV2Authorization(await createBrowserOAuthAuthorization(client));
+            return toV2Authorization(await createBrowserOAuthAuthorization());
           }
           return toV2Authorization(
-            await createBrowserOAuthAuthorization(client, {
+            await createBrowserOAuthAuthorization({
               loginHint: action.email,
               persist: async (result) => {
                 const accounts = (await loadAccounts())?.accounts ?? [];
@@ -219,19 +257,18 @@ const server: Plugin.Plugin = {
                 }
                 assertSameAccount(accounts[index]?.email, result.email);
                 await replaceStoredAccount(index, result);
-                await client.tui.showToast({
-                  body: { message: `Re-authenticated ${result.email ?? `account ${index + 1}`}`, variant: "success" },
-                });
+                log.info(`Re-authenticated ${result.email ?? `account ${index + 1}`}`);
               },
             }),
           );
         },
         refresh: async (credential) => {
-          const refreshed = await refreshAccessToken(
-            { type: "oauth", refresh: credential.refresh, access: credential.access, expires: credential.expires },
-            client,
-            PROVIDER_ID,
-          );
+          const refreshed = await refreshAccessToken({
+            type: "oauth",
+            refresh: credential.refresh,
+            access: credential.access,
+            expires: credential.expires,
+          });
           if (!refreshed?.access) {
             throw new Error("Antigravity token refresh failed");
           }
@@ -261,36 +298,84 @@ const server: Plugin.Plugin = {
       });
     });
 
-    // A sign-in changes the pool on disk: refresh the provider activation and
-    // the form's account list, and rebuild the account manager.
-    const onCredentialsChanged = async () => {
-      loader = undefined;
-      pool = await loadPool();
-      await ctx.provider.reload();
-      await ctx.integration.reload();
-      void discoverModels();
+    // credential.updated / credential.switched carry no data and fire for every
+    // provider; the pool file changes when the account manager CLI (or another
+    // process) edits it. Rebuild the route only when the google credential
+    // changed or the pool became empty or non-empty. Other pool changes are
+    // applied by the shared pool itself (see account-pool.ts); only the
+    // sign-in form, which lists the accounts, is reloaded.
+    let checking: Promise<void> = Promise.resolve();
+    const checkCredentials = () => {
+      checking = checking.then(async () => {
+        const nextPool = await loadPool();
+        const nextCredentialKey = credentialKey(await getAuth().catch(() => ({ type: "none" })));
+        const nextPoolKey = JSON.stringify(nextPool);
+        const credentialChanged = nextCredentialKey !== lastCredentialKey;
+        if (!credentialChanged && nextPoolKey === lastPoolKey) return;
+        const activationChanged = (nextPool.length > 0) !== (pool.length > 0);
+        lastCredentialKey = nextCredentialKey;
+        lastPoolKey = nextPoolKey;
+        pool = nextPool;
+        if (credentialChanged || activationChanged) {
+          await resetRoute();
+          await ctx.integration.reload();
+          await refreshProvider();
+          return;
+        }
+        await ctx.integration.reload();
+      }).catch((error) => {
+        log.warn("Failed to apply credential change", { error: error instanceof Error ? error.message : String(error) });
+      });
+      return checking;
+    };
+    let debounce: ReturnType<typeof setTimeout> | undefined;
+    const scheduleCheck = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        debounce = undefined;
+        void checkCredentials();
+      }, CREDENTIAL_EVENT_DEBOUNCE_MS);
+      debounce.unref?.();
     };
 
+    // Keep listening for the plugin's lifetime: a subscription that ends or
+    // fails is opened again (with backoff), then checks for missed changes.
     const abort = new AbortController();
     void (async () => {
-      try {
-        for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
-          const type = (event as { type?: string }).type;
-          if (type === "credential.updated" || type === "credential.switched") {
-            await onCredentialsChanged();
+      let failures = 0;
+      while (!abort.signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+            failures = 0;
+            const type = (event as { type?: string }).type;
+            if (type === "credential.updated" || type === "credential.switched") {
+              scheduleCheck();
+            }
+          }
+        } catch (error) {
+          if (!abort.signal.aborted) {
+            log.warn("Event subscription failed; reconnecting", {
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
         }
-      } catch (error) {
-        if (!abort.signal.aborted) {
-          log.debug("event-subscription-ended", { error: error instanceof Error ? error.message : String(error) });
-        }
+        if (abort.signal.aborted) break;
+        failures += 1;
+        await abortableDelay(Math.min(MAX_RESUBSCRIBE_DELAY_MS, 500 * 2 ** failures), abort.signal);
+        if (!abort.signal.aborted) scheduleCheck();
       }
     })();
 
-    void discoverModels();
+    const unwatchPool = watchAccountPoolFile(scheduleCheck);
 
-    return () => {
+    void refreshProvider();
+
+    return async () => {
       abort.abort();
+      unwatchPool();
+      if (debounce) clearTimeout(debounce);
+      await resetRoute();
+      await core.dispose();
     };
   },
 };

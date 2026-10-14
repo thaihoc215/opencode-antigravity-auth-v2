@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ANTIGRAVITY_PROVIDER_ID } from "../constants";
 import { refreshAccessToken } from "./token";
-import type { OAuthAuthDetails, PluginClient } from "./types";
+import type { OAuthAuthDetails } from "./types";
 
 const baseAuth: OAuthAuthDetails = {
   type: "oauth",
@@ -11,23 +10,12 @@ const baseAuth: OAuthAuthDetails = {
   expires: Date.now() - 1000,
 };
 
-function createClient() {
-  return {
-    auth: {
-      set: vi.fn(async () => {}),
-    },
-  } as PluginClient & {
-    auth: { set: ReturnType<typeof vi.fn> };
-  };
-}
-
 describe("refreshAccessToken", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("updates the caller when refresh token is unchanged", async () => {
-    const client = createClient();
+  it("returns the new access token when the refresh token is unchanged", async () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
         JSON.stringify({
@@ -39,14 +27,13 @@ describe("refreshAccessToken", () => {
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const result = await refreshAccessToken(baseAuth, client, ANTIGRAVITY_PROVIDER_ID);
+    const result = await refreshAccessToken(baseAuth);
 
     expect(result?.access).toBe("new-access");
-    expect(client.auth.set.mock.calls.length).toBe(0);
+    expect(result?.refresh).toBe(baseAuth.refresh);
   });
 
   it("handles Google refresh token rotation", async () => {
-    const client = createClient();
     const fetchMock = vi.fn(async () => {
       return new Response(
         JSON.stringify({
@@ -59,15 +46,13 @@ describe("refreshAccessToken", () => {
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const result = await refreshAccessToken(baseAuth, client, ANTIGRAVITY_PROVIDER_ID);
+    const result = await refreshAccessToken(baseAuth);
 
     expect(result?.access).toBe("next-access");
     expect(result?.refresh).toContain("rotated-token");
-    expect(client.auth.set.mock.calls.length).toBe(0);
   });
 
   it("throws a typed error on invalid_grant", async () => {
-    const client = createClient();
     const fetchMock = vi.fn(async () => {
       return new Response(
         JSON.stringify({
@@ -79,9 +64,43 @@ describe("refreshAccessToken", () => {
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(refreshAccessToken(baseAuth, client, ANTIGRAVITY_PROVIDER_ID)).rejects.toMatchObject({
+    await expect(refreshAccessToken(baseAuth)).rejects.toMatchObject({
       name: "AntigravityTokenRefreshError",
       code: "invalid_grant",
     });
+  });
+
+  it("shares one request between concurrent refreshes of the same token", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchMock = vi.fn(async () => {
+      await gate;
+      return new Response(JSON.stringify({ access_token: "shared-access", expires_in: 3600 }), { status: 200 });
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const first = refreshAccessToken(baseAuth);
+    const second = refreshAccessToken({ ...baseAuth, access: "other" });
+    release();
+
+    expect((await first)?.access).toBe("shared-access");
+    expect((await second)?.access).toBe("shared-access");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // A later refresh asks Google again.
+    await refreshAccessToken(baseAuth);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds the token request with a timeout", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(refreshAccessToken(baseAuth)).resolves.toBeUndefined();
   });
 });

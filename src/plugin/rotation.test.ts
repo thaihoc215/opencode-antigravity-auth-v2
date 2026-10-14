@@ -351,62 +351,6 @@ describe("TokenBucketTracker", () => {
   });
 });
 
-describe("tracker remapAfterRemoval", () => {
-  it("HealthScoreTracker drops the removed index and shifts higher indices down", () => {
-    const mockTime = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => mockTime);
-
-    const tracker = new HealthScoreTracker();
-    // Distinct consecutive-failure counts make each account's state identifiable.
-    tracker.recordFailure(0); // index 0 -> 1 failure
-    tracker.recordFailure(1);
-    tracker.recordFailure(1); // index 1 -> 2 failures
-    tracker.recordFailure(2);
-    tracker.recordFailure(2);
-    tracker.recordFailure(2); // index 2 -> 3 failures
-    tracker.recordFailure(3);
-    tracker.recordFailure(3);
-    tracker.recordFailure(3);
-    tracker.recordFailure(3); // index 3 -> 4 failures
-
-    tracker.remapAfterRemoval(1);
-
-    expect(tracker.getConsecutiveFailures(0)).toBe(1); // unchanged (below removed)
-    expect(tracker.getConsecutiveFailures(1)).toBe(3); // was index 2
-    expect(tracker.getConsecutiveFailures(2)).toBe(4); // was index 3
-    expect(tracker.getConsecutiveFailures(3)).toBe(0); // nothing here now
-
-    vi.restoreAllMocks();
-  });
-
-  it("TokenBucketTracker drops the removed index and shifts higher indices down", () => {
-    const mockTime = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => mockTime);
-
-    const tracker = new TokenBucketTracker(); // initialTokens 50, maxTokens 50
-    tracker.consume(0, 1); // index 0 -> 49
-    tracker.consume(1, 5); // index 1 -> 45
-    tracker.consume(2, 10); // index 2 -> 40
-    tracker.consume(3, 20); // index 3 -> 30
-
-    tracker.remapAfterRemoval(1);
-
-    expect(tracker.getTokens(0)).toBe(49); // unchanged
-    expect(tracker.getTokens(1)).toBe(40); // was index 2
-    expect(tracker.getTokens(2)).toBe(30); // was index 3
-    expect(tracker.getTokens(3)).toBe(50); // default for unknown account
-
-    vi.restoreAllMocks();
-  });
-
-  it("is a no-op safe call when the tracker has no state", () => {
-    const health = new HealthScoreTracker();
-    const tokens = new TokenBucketTracker();
-    expect(() => health.remapAfterRemoval(0)).not.toThrow();
-    expect(() => tokens.remapAfterRemoval(0)).not.toThrow();
-  });
-});
-
 describe("selectHybridAccount", () => {
   it("returns null when no accounts available", () => {
     const tokenTracker = new TokenBucketTracker();

@@ -53,14 +53,12 @@ export type { ClaudeTransformOptions, ClaudeTransformResult } from "./claude";
 export {
   isGeminiModel,
   isGemini3Model,
-  isImageGenerationModel,
-  buildGemini3ThinkingConfig,
+buildGemini3ThinkingConfig,
   buildGemini25ThinkingConfig,
-  buildImageGenerationConfig,
-  normalizeGeminiTools,
+normalizeGeminiTools,
   applyGeminiTransforms,
 } from "./gemini";
-export type { GeminiTransformOptions, GeminiTransformResult, ImageConfig } from "./gemini";
+export type { GeminiTransformOptions, GeminiTransformResult } from "./gemini";
 
 // Cross-model sanitization
 export {

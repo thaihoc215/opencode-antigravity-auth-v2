@@ -10,11 +10,11 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 import lockfile from "proper-lockfile";
 import type { HeaderStyle } from "../constants";
 import { createLogger } from "./logger";
+import { getConfigDir, getLegacyWindowsConfigDir } from "./paths";
 
 const log = createLogger("storage");
 
@@ -212,11 +212,23 @@ export interface AccountMetadataV3 {
   /** Per-account device fingerprint for rate limit mitigation */
   fingerprint?: import("./fingerprint").Fingerprint;
   fingerprintHistory?: import("./fingerprint").FingerprintVersion[];
+  /**
+   * When `enabled` or the verification fields last changed (epoch ms). Both the
+   * account manager CLI and a running server edit them; the later change wins
+   * a merge, so a server saving its in-memory pool cannot revert a CLI edit.
+   */
+  statusChangedAt?: number;
   /** Set when Google asks the user to verify this account before requests can continue. */
   verificationRequired?: boolean;
   verificationRequiredAt?: number;
   verificationRequiredReason?: string;
   verificationUrl?: string;
+  /**
+   * When Google rejected the refresh token (`invalid_grant`: revoked, password
+   * changed, expired). The account stays in the pool, disabled, until it is
+   * signed in again.
+   */
+  revokedAt?: number;
   /** Cached soft quota data */
   cachedQuota?: Record<string, { remainingFraction?: number; resetTime?: string; modelCount: number }>;
   cachedQuotaUpdatedAt?: number;
@@ -248,35 +260,6 @@ type AnyAccountStorage =
   | AccountStorage
   | AccountStorageV3
   | AccountStorageV4;
-
-/**
- * Gets the legacy Windows config directory (%APPDATA%\opencode).
- * Used for migration from older plugin versions.
- */
-function getLegacyWindowsConfigDir(): string {
-  return join(
-    process.env.APPDATA || join(homedir(), "AppData", "Roaming"),
-    "opencode",
-  );
-}
-
-/**
- * Gets the config directory path, with the following precedence:
- * 1. OPENCODE_CONFIG_DIR env var (if set)
- * 2. ~/.config/opencode (all platforms, including Windows)
- *
- * On Windows, also checks for legacy %APPDATA%\opencode path for migration.
- */
-function getConfigDir(): string {
-  // 1. Check for explicit override via env var
-  if (process.env.OPENCODE_CONFIG_DIR) {
-    return process.env.OPENCODE_CONFIG_DIR;
-  }
-
-  // 2. Use ~/.config/opencode on all platforms (including Windows)
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
 
 /**
  * Migrates config from legacy Windows location to the new path.
@@ -361,18 +344,19 @@ export function getStoragePath(): string {
   return getStoragePathWithMigration();
 }
 
-/**
- * Gets the config directory path. Exported for use by other modules.
- */
-export { getConfigDir };
 
 const LOCK_OPTIONS = {
   stale: 10000,
+  // About 13 s of retries: the CLI and the server can both be writing.
   retries: {
-    retries: 5,
+    retries: 10,
     minTimeout: 100,
-    maxTimeout: 1000,
+    maxTimeout: 2000,
     factor: 2,
+  },
+  // proper-lockfile's default throws from a timer, which would crash the host.
+  onCompromised: (error: Error) => {
+    log.warn("Account storage lock was compromised", { error: String(error) });
   },
 };
 
@@ -633,6 +617,61 @@ function maxDefined(a: number | undefined, b: number | undefined): number | unde
   return Math.max(a, b);
 }
 
+type AccountStatus = Pick<
+  AccountMetadataV3,
+  | "enabled"
+  | "statusChangedAt"
+  | "verificationRequired"
+  | "verificationRequiredAt"
+  | "verificationRequiredReason"
+  | "verificationUrl"
+  | "revokedAt"
+>;
+
+function accountStatus(account: AccountMetadataV3): AccountStatus {
+  return {
+    enabled: account.enabled,
+    statusChangedAt: account.statusChangedAt,
+    verificationRequired: account.verificationRequired,
+    verificationRequiredAt: account.verificationRequiredAt,
+    verificationRequiredReason: account.verificationRequiredReason,
+    verificationUrl: account.verificationUrl,
+    revokedAt: account.revokedAt,
+  };
+}
+
+/**
+ * Enable/disable, verification and revocation state, resolved as one group: the side that
+ * changed it last wins. A side without `statusChangedAt` (an older writer) only
+ * wins when neither side has one.
+ */
+function mergeAccountStatus(existing: AccountMetadataV3, incoming: AccountMetadataV3): AccountStatus {
+  const existingAt = numericTimestamp(existing.statusChangedAt);
+  const incomingAt = numericTimestamp(incoming.statusChangedAt);
+  if (existingAt !== undefined && (incomingAt === undefined || existingAt > incomingAt)) {
+    return accountStatus(existing);
+  }
+  return accountStatus(incoming);
+}
+
+/**
+ * Keeps the newer device fingerprint (by `createdAt`) with its history, so two
+ * writers that generated one each for the same account settle on one.
+ */
+function mergeFingerprint(
+  existing: AccountMetadataV3,
+  incoming: AccountMetadataV3,
+): Pick<AccountMetadataV3, "fingerprint" | "fingerprintHistory"> {
+  const existingAt = numericTimestamp(existing.fingerprint?.createdAt);
+  const incomingAt = numericTimestamp(incoming.fingerprint?.createdAt);
+  const keepExisting = !!existing.fingerprint && (
+    !incoming.fingerprint ||
+    (existingAt !== undefined && (incomingAt === undefined || existingAt > incomingAt))
+  );
+  const winner = keepExisting ? existing : incoming;
+  return { fingerprint: winner.fingerprint, fingerprintHistory: winner.fingerprintHistory };
+}
+
 function mergeAccountStorage(
   existing: AccountStorageV4,
   incoming: AccountStorageV4,
@@ -660,6 +699,8 @@ function mergeAccountStorage(
           projectId: acc.projectId ?? existingAcc.projectId,
           managedProjectId: acc.managedProjectId ?? existingAcc.managedProjectId,
           ...mergeRateLimitState(existingAcc, acc),
+          ...mergeAccountStatus(existingAcc, acc),
+          ...mergeFingerprint(existingAcc, acc),
           lastUsed: Math.max(existingAcc.lastUsed || 0, acc.lastUsed || 0),
         });
       } else {
@@ -1007,7 +1048,30 @@ export async function loadAccounts(): Promise<AccountStorageV4 | null> {
   }
 }
 
-export async function saveAccounts(storage: AccountStorageV4): Promise<void> {
+/**
+ * Merges `storage` into the pool on disk and returns what was written, so a
+ * caller holding the pool in memory can pick up other writers' changes.
+ */
+export async function saveAccounts(storage: AccountStorageV4): Promise<AccountStorageV4> {
+  const path = getStoragePath();
+  const configDir = dirname(path);
+  await fs.mkdir(configDir, { recursive: true });
+  await ensureGitignore(configDir);
+
+  return withFileLock(path, async () => {
+    const existing = await loadAccountsUnsafe();
+    const merged = existing ? mergeAccountStorage(existing, storage) : storage;
+    await writeAccountsAtomically(path, merged);
+    return merged;
+  });
+}
+
+/**
+ * Makes `storage` the whole pool: every account on disk that it does not
+ * contain is tombstoned, so a running server saving its in-memory copy cannot
+ * bring it back. Used by "start fresh" and "delete all accounts".
+ */
+export async function replaceAccountPool(storage: AccountStorageV4): Promise<void> {
   const path = getStoragePath();
   const configDir = dirname(path);
   await fs.mkdir(configDir, { recursive: true });
@@ -1015,9 +1079,29 @@ export async function saveAccounts(storage: AccountStorageV4): Promise<void> {
 
   await withFileLock(path, async () => {
     const existing = await loadAccountsUnsafe();
-    const merged = existing ? mergeAccountStorage(existing, storage) : storage;
-    await writeAccountsAtomically(path, merged);
+    const kept = new Set(storage.accounts.map((account) => account.refreshToken));
+    const deletedRefreshTokenHashes = new Set([
+      ...(existing?.deletedRefreshTokenHashes ?? []),
+      ...(storage.deletedRefreshTokenHashes ?? []),
+    ]);
+    for (const account of existing?.accounts ?? []) {
+      if (account.refreshToken && !kept.has(account.refreshToken)) {
+        deletedRefreshTokenHashes.add(hashRefreshToken(account.refreshToken));
+      }
+    }
+    await writeAccountsAtomically(path, {
+      ...storage,
+      activeIndex: clampActiveIndex(storage.activeIndex, storage.accounts.length),
+      deletedRefreshTokenHashes: deletedRefreshTokenHashes.size > 0
+        ? Array.from(deletedRefreshTokenHashes)
+        : undefined,
+    });
   });
+}
+
+/** Deletes every account (see replaceAccountPool). */
+export async function removeAllAccountsFromStorage(): Promise<void> {
+  await replaceAccountPool({ version: 4, accounts: [], activeIndex: 0 });
 }
 
 /**
@@ -1076,13 +1160,33 @@ export async function removeAccountFromStorage(refreshToken: string): Promise<vo
   });
 }
 
+/**
+ * On Windows, renaming over a file another program has open (an editor, an
+ * antivirus scan) fails with EPERM/EACCES/EBUSY until it lets go.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const transient = code === "EPERM" || code === "EACCES" || code === "EBUSY";
+      if (!transient || attempt >= 10) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    }
+  }
+}
+
 async function writeAccountsAtomically(path: string, storage: AccountStorageV4): Promise<void> {
   const tempPath = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   const content = JSON.stringify(storage, null, 2);
 
   try {
     await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
-    await fs.rename(tempPath, path);
+    await renameWithRetry(tempPath, path);
   } catch (error) {
     try {
       await fs.unlink(tempPath);
@@ -1100,7 +1204,13 @@ async function loadAccountsUnsafe(): Promise<AccountStorageV4 | null> {
     await ensureSecurePermissions(path);
 
     const content = await fs.readFile(path, "utf-8");
+    if (!content?.trim()) {
+      return null;
+    }
     const parsed = JSON.parse(content) as AnyAccountStorage;
+    if (!parsed || !Array.isArray(parsed.accounts)) {
+      throw new Error("Invalid account storage format");
+    }
 
     if (parsed.version === 1) {
       return remapDeduplicatedStorage(
@@ -1118,13 +1228,16 @@ async function loadAccountsUnsafe(): Promise<AccountStorageV4 | null> {
       return remapDeduplicatedStorage(parsed);
     }
 
-    return null;
+    throw new Error(`Unknown account storage version: ${String((parsed as { version?: unknown }).version)}`);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
       return null;
     }
-    return null;
+    // An unreadable pool (bad JSON from a hand edit, a file another program
+    // holds) must fail the write: treating it as empty would overwrite every
+    // account and its deletion markers with the writer's snapshot.
+    throw error;
   }
 }
 
@@ -1145,16 +1258,4 @@ function remapDeduplicatedStorage(storage: AccountStorageV4): AccountStorageV4 {
       deduplicatedAccounts,
     ),
   };
-}
-
-export async function clearAccounts(): Promise<void> {
-  try {
-    const path = getStoragePath();
-    await fs.unlink(path);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      log.error("Failed to clear account storage", { error: String(error) });
-    }
-  }
 }

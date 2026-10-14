@@ -18,9 +18,9 @@ const pool = [
 describe("summarizeAccounts", () => {
   it("keeps index, email and the flags shown in the form", () => {
     expect(summarizeAccounts(pool)).toEqual([
-      { index: 0, email: "a@example.com", enabled: true, verificationRequired: false },
-      { index: 1, email: "b@example.com", enabled: false, verificationRequired: false },
-      { index: 2, email: undefined, enabled: true, verificationRequired: true },
+      { index: 0, email: "a@example.com", enabled: true, verificationRequired: false, revoked: false },
+      { index: 1, email: "b@example.com", enabled: false, verificationRequired: false, revoked: false },
+      { index: 2, email: undefined, enabled: true, verificationRequired: true, revoked: false },
     ]);
   });
 });
@@ -37,6 +37,18 @@ describe("buildActionField", () => {
       { value: "reauth:1", label: "Re-authenticate b@example.com", description: "Account 2 · disabled" },
       { value: "reauth:2", label: "Re-authenticate account 3", description: "Account 3 · verification required" },
     ]);
+  });
+
+  it("tells which accounts Google signed out", () => {
+    const field = buildActionField(
+      summarizeAccounts([{ email: "a@example.com", enabled: false, revokedAt: 1 }]),
+      cli,
+    );
+    expect(field.options[1]).toEqual({
+      value: "reauth:0",
+      label: "Re-authenticate a@example.com",
+      description: "Account 1 · signed out by Google - sign in again",
+    });
   });
 
   it("points at the account manager CLI for everything the form cannot do", () => {

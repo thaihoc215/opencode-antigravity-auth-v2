@@ -1,5 +1,5 @@
 import { formatRefreshParts, parseRefreshParts } from "./auth";
-import { loadAccounts, removeAccountFromStorage, saveAccounts, saveAccountsReplace, type AccountStorageV4, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
+import { hashRefreshToken, loadAccounts, saveAccounts, saveAccountsReplace, type AccountStorageV4, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
 import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
 import { getHealthTracker, getTokenTracker, selectHybridAccount, type AccountWithMetrics } from "./rotation";
@@ -8,6 +8,9 @@ import type { QuotaGroup, QuotaGroupSummary } from "./quota";
 import { getModelFamily } from "./transform/model-resolver";
 import { debugLogToFile } from "./debug";
 import { formatAccountLabel } from "./logging-utils";
+import { createLogger } from "./logger";
+
+const log = createLogger("accounts");
 
 
 export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
@@ -175,14 +178,53 @@ export interface ManagedAccount {
   /** Cached quota data from last checkAccountsQuota() call */
   cachedQuota?: Partial<Record<QuotaGroup, QuotaGroupSummary>>;
   cachedQuotaUpdatedAt?: number;
+  /** When `enabled` or the verification fields last changed (see AccountMetadataV3). */
+  statusChangedAt?: number;
   verificationRequired?: boolean;
   verificationRequiredAt?: number;
   verificationRequiredReason?: string;
   verificationUrl?: string;
+  /** See AccountMetadataV3.revokedAt. */
+  revokedAt?: number;
 }
 
 function nowMs(): number {
   return Date.now();
+}
+
+/** Builds the in-memory account for a stored pool entry (with a refresh token). */
+function toManagedAccount(acc: AccountMetadataV3, index: number, now: number): ManagedAccount {
+  const clearedQuotaKeys = sanitizeClearedQuotaKeys(acc.clearedQuotaKeys);
+  return {
+    index,
+    email: acc.email,
+    addedAt: clampNonNegativeInt(acc.addedAt, now),
+    lastUsed: clampNonNegativeInt(acc.lastUsed, 0),
+    parts: {
+      refreshToken: acc.refreshToken,
+      projectId: acc.projectId,
+      managedProjectId: acc.managedProjectId,
+    },
+    enabled: acc.enabled !== false,
+    rateLimitResetTimes: acc.rateLimitResetTimes ?? {},
+    rateLimitSetTimes: sanitizeRateLimitSetTimes(acc.rateLimitSetTimes, acc.rateLimitResetTimes),
+    clearedQuotaKeys: clearedQuotaKeys,
+    clearedSetTimes: sanitizeClearedSetTimes(acc.clearedSetTimes, clearedQuotaKeys),
+    lastSwitchReason: acc.lastSwitchReason,
+    coolingDownUntil: acc.coolingDownUntil,
+    cooldownReason: acc.cooldownReason,
+    touchedForQuota: {},
+    fingerprint: acc.fingerprint ?? generateFingerprint(),
+    fingerprintHistory: acc.fingerprintHistory ?? [],
+    cachedQuota: acc.cachedQuota as Partial<Record<QuotaGroup, QuotaGroupSummary>> | undefined,
+    cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
+    statusChangedAt: acc.statusChangedAt,
+    verificationRequired: acc.verificationRequired,
+    verificationRequiredAt: acc.verificationRequiredAt,
+    verificationRequiredReason: acc.verificationRequiredReason,
+    verificationUrl: acc.verificationUrl,
+    revokedAt: acc.revokedAt,
+  };
 }
 
 function clampNonNegativeInt(value: unknown, fallback: number): number {
@@ -430,8 +472,6 @@ export class AccountManager {
     claude: false,
     gemini: false,
   };
-  private lastToastAccountIndex = -1;
-  private lastToastTime = 0;
 
   private savePending = false;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -440,6 +480,9 @@ export class AccountManager {
   /** Tracks an in-flight disk write so flushSaveToDisk can await a write that has
    * already started (savePending is cleared before the write settles). */
   private activeSave: Promise<void> | null = null;
+  private consecutiveSaveFailures = 0;
+  private saveDueAt = 0;
+  private disposed = false;
 
   static async loadFromDisk(authFallback?: OAuthAuthDetails): Promise<AccountManager> {
     const stored = await loadAccounts();
@@ -458,51 +501,21 @@ export class AccountManager {
     if (stored && stored.accounts.length > 0) {
       const baseNow = nowMs();
       this.accounts = stored.accounts
-        .map((acc, index): ManagedAccount | null => {
-          if (!acc.refreshToken || typeof acc.refreshToken !== "string") {
-            return null;
-          }
+        .filter((acc) => !!acc.refreshToken && typeof acc.refreshToken === "string")
+        .map((acc, index): ManagedAccount => {
           const matchesFallback = !!(
             authFallback &&
             authParts &&
             authParts.refreshToken &&
             acc.refreshToken === authParts.refreshToken
           );
-
-          const clearedQuotaKeys = sanitizeClearedQuotaKeys(acc.clearedQuotaKeys);
-
-          return {
-            index,
-            email: acc.email,
-            addedAt: clampNonNegativeInt(acc.addedAt, baseNow),
-            lastUsed: clampNonNegativeInt(acc.lastUsed, 0),
-            parts: {
-              refreshToken: acc.refreshToken,
-              projectId: acc.projectId,
-              managedProjectId: acc.managedProjectId,
-            },
-            access: matchesFallback ? authFallback?.access : undefined,
-            expires: matchesFallback ? authFallback?.expires : undefined,
-            enabled: acc.enabled !== false,
-            rateLimitResetTimes: acc.rateLimitResetTimes ?? {},
-            rateLimitSetTimes: sanitizeRateLimitSetTimes(acc.rateLimitSetTimes, acc.rateLimitResetTimes),
-            clearedQuotaKeys: clearedQuotaKeys,
-            clearedSetTimes: sanitizeClearedSetTimes(acc.clearedSetTimes, clearedQuotaKeys),
-            lastSwitchReason: acc.lastSwitchReason,
-            coolingDownUntil: acc.coolingDownUntil,
-            cooldownReason: acc.cooldownReason,
-            touchedForQuota: {},
-            fingerprint: acc.fingerprint ?? generateFingerprint(),
-            fingerprintHistory: acc.fingerprintHistory ?? [],
-            cachedQuota: acc.cachedQuota as Partial<Record<QuotaGroup, QuotaGroupSummary>> | undefined,
-            cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
-            verificationRequired: acc.verificationRequired,
-            verificationRequiredAt: acc.verificationRequiredAt,
-            verificationRequiredReason: acc.verificationRequiredReason,
-            verificationUrl: acc.verificationUrl,
-          };
-        })
-        .filter((a): a is ManagedAccount => a !== null);
+          const managed = toManagedAccount(acc, index, baseNow);
+          if (matchesFallback) {
+            managed.access = authFallback?.access;
+            managed.expires = authFallback?.expires;
+          }
+          return managed;
+        });
 
       // Update fingerprint versions to match the current runtime version.
       // Saved fingerprints may carry an older version string; this ensures
@@ -600,23 +613,6 @@ export class AccountManager {
       }
     }
     return null;
-  }
-
-  /**
-   * Check if we should show an account switch toast.
-   * Debounces repeated toasts for the same account.
-   */
-  shouldShowAccountToast(accountIndex: number, debounceMs = 30000): boolean {
-    const now = nowMs();
-    if (accountIndex !== this.lastToastAccountIndex) {
-      return true;
-    }
-    return now - this.lastToastTime >= debounceMs;
-  }
-
-  markToastShown(accountIndex: number): void {
-    this.lastToastAccountIndex = accountIndex;
-    this.lastToastTime = nowMs();
   }
 
   getCurrentOrNextForFamily(
@@ -758,6 +754,9 @@ export class AccountManager {
     const account = this.accounts.find(a => a.index === accountIndex);
     if (account) {
       account.lastUsed = nowMs();
+      // Usage bookkeeping (lastUsed, the current account) is not urgent: write it
+      // at most every 30 s instead of once per request.
+      this.requestSaveToDisk(30_000);
     }
   }
 
@@ -946,6 +945,18 @@ export class AccountManager {
     if (!account) {
       return false;
     }
+    this.applyEnabled(accountIndex, enabled);
+    account.statusChangedAt = nowMs();
+    this.requestSaveToDisk();
+    return true;
+  }
+
+  /** Sets `enabled` in memory and moves the current selection off a disabled account. */
+  private applyEnabled(accountIndex: number, enabled: boolean): void {
+    const account = this.accounts[accountIndex];
+    if (!account) {
+      return;
+    }
     account.enabled = enabled;
 
     if (!enabled) {
@@ -956,9 +967,6 @@ export class AccountManager {
         }
       }
     }
-
-    this.requestSaveToDisk();
-    return true;
   }
 
   markAccountVerificationRequired(accountIndex: number, reason?: string, verifyUrl?: string): boolean {
@@ -969,6 +977,7 @@ export class AccountManager {
 
     account.verificationRequired = true;
     account.verificationRequiredAt = nowMs();
+    account.statusChangedAt = account.verificationRequiredAt;
     account.verificationRequiredReason = reason?.trim() || undefined;
 
     const normalizedVerifyUrl = verifyUrl?.trim();
@@ -1002,6 +1011,9 @@ export class AccountManager {
     account.verificationRequiredAt = undefined;
     account.verificationRequiredReason = undefined;
     account.verificationUrl = undefined;
+    if (wasVerificationRequired || hadMetadata) {
+      account.statusChangedAt = nowMs();
+    }
 
     if (enableAccount && wasVerificationRequired && account.enabled === false) {
       this.setAccountEnabled(accountIndex, true);
@@ -1012,50 +1024,27 @@ export class AccountManager {
     return true;
   }
 
-  removeAccountByIndex(accountIndex: number): boolean {
-    if (accountIndex < 0 || accountIndex >= this.accounts.length) {
-      return false;
+  /**
+   * Google rejected the account's refresh token (`invalid_grant`). The account
+   * is disabled but kept, with its email, project and fingerprint, so it can be
+   * signed in again ("Refresh token" in the account manager, or re-authenticate
+   * through OpenCode). Saved right away.
+   */
+  markAccountRevoked(account: ManagedAccount): void {
+    if (!this.accounts.includes(account)) {
+      return;
     }
-    const account = this.accounts[accountIndex];
-    if (!account) {
-      return false;
-    }
-    return this.removeAccount(account);
+    account.revokedAt = nowMs();
+    account.statusChangedAt = account.revokedAt;
+    account.access = undefined;
+    account.expires = undefined;
+    this.applyEnabled(account.index, false);
+    this.requestSaveToDisk(0);
   }
 
-  removeAccount(account: ManagedAccount): boolean {
-    const idx = this.accounts.indexOf(account);
-    if (idx < 0) {
-      return false;
-    }
-
-    this.accounts.splice(idx, 1);
-    this.accounts.forEach((acc, index) => {
-      acc.index = index;
-    });
-
-    if (this.accounts.length === 0) {
-      this.cursor = 0;
-      this.currentAccountIndexByFamily.claude = -1;
-      this.currentAccountIndexByFamily.gemini = -1;
-      return true;
-    }
-
-    if (this.cursor > idx) {
-      this.cursor -= 1;
-    }
-    this.cursor = this.cursor % this.accounts.length;
-
-    for (const family of ["claude", "gemini"] as ModelFamily[]) {
-      if (this.currentAccountIndexByFamily[family] > idx) {
-        this.currentAccountIndexByFamily[family] -= 1;
-      }
-      if (this.currentAccountIndexByFamily[family] >= this.accounts.length) {
-        this.currentAccountIndexByFamily[family] = -1;
-      }
-    }
-
-    return true;
+  /** True when the pool has accounts and every one's refresh token was revoked. */
+  areAllAccountsRevoked(): boolean {
+    return this.accounts.length > 0 && this.accounts.every((account) => account.revokedAt !== undefined);
   }
 
   updateFromAuth(account: ManagedAccount, auth: OAuthAuthDetails): void {
@@ -1129,9 +1118,88 @@ export class AccountManager {
 
   async saveToDisk(replace = false): Promise<void> {
     const storage = this.createStorageSnapshot();
-    return this.enqueueStorageOperation(() => replace
-      ? saveAccountsReplace(storage)
-      : saveAccounts(storage));
+    return this.enqueueStorageOperation(async () => {
+      if (replace) {
+        await saveAccountsReplace(storage);
+        return;
+      }
+      this.adoptStoredState(await saveAccounts(storage));
+    });
+  }
+
+  /**
+   * Re-reads the pool file and applies what other writers (the account manager
+   * CLI, another server) changed: see adoptStoredState. Accounts added on disk
+   * are appended. Runs in the storage queue, after any save in progress.
+   */
+  async syncFromDisk(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    await this.enqueueStorageOperation(async () => {
+      const stored = await loadAccounts();
+      if (this.disposed || !stored) {
+        return;
+      }
+      this.adoptStoredState(stored);
+      const known = new Set(this.accounts.map((account) => account.parts.refreshToken));
+      const now = nowMs();
+      for (const acc of stored.accounts) {
+        if (!acc.refreshToken || known.has(acc.refreshToken)) {
+          continue;
+        }
+        this.accounts.push(toManagedAccount(acc, this.accounts.length, now));
+        known.add(acc.refreshToken);
+        log.info(`Account ${acc.email ?? this.accounts.length} added to the pool`);
+      }
+      for (const family of Object.keys(this.currentAccountIndexByFamily) as ModelFamily[]) {
+        if (this.currentAccountIndexByFamily[family] < 0) {
+          this.currentAccountIndexByFamily[family] = this.accounts.find((a) => a.enabled !== false)?.index ?? -1;
+        }
+      }
+    });
+  }
+
+  /**
+   * Applies what other writers (the account manager CLI, another server) saved
+   * to the pool: newer enable/disable, verification and revocation state, newer
+   * device fingerprints, and deletions. A deleted account, or one whose email
+   * now belongs to another entry (signed in again with a new token), is
+   * disabled rather than removed so account indices, and the index-keyed health
+   * scores, stay stable until the pool is next loaded.
+   */
+  private adoptStoredState(stored: AccountStorageV4 | undefined): void {
+    if (!stored?.accounts) {
+      return;
+    }
+    const byToken = new Map(stored.accounts.map((account) => [account.refreshToken, account]));
+    const storedEmails = new Set(stored.accounts.map((account) => account.email).filter(Boolean));
+    const deleted = new Set(stored.deletedRefreshTokenHashes ?? []);
+    for (const account of this.accounts) {
+      const saved = byToken.get(account.parts.refreshToken);
+      if (!saved) {
+        const superseded =
+          deleted.has(hashRefreshToken(account.parts.refreshToken)) ||
+          (!!account.email && storedEmails.has(account.email));
+        if (account.enabled && superseded) {
+          this.applyEnabled(account.index, false);
+        }
+        continue;
+      }
+      if ((saved.statusChangedAt ?? -1) > (account.statusChangedAt ?? -1)) {
+        account.statusChangedAt = saved.statusChangedAt;
+        account.verificationRequired = saved.verificationRequired;
+        account.verificationRequiredAt = saved.verificationRequiredAt;
+        account.verificationRequiredReason = saved.verificationRequiredReason;
+        account.verificationUrl = saved.verificationUrl;
+        account.revokedAt = saved.revokedAt;
+        this.applyEnabled(account.index, saved.enabled !== false);
+      }
+      if (saved.fingerprint && (saved.fingerprint.createdAt ?? -1) > (account.fingerprint?.createdAt ?? -1)) {
+        account.fingerprint = saved.fingerprint;
+        account.fingerprintHistory = saved.fingerprintHistory ?? [];
+      }
+    }
   }
 
   /**
@@ -1228,10 +1296,12 @@ export class AccountManager {
         fingerprintHistory: a.fingerprintHistory?.length ? a.fingerprintHistory : undefined,
         cachedQuota: a.cachedQuota && Object.keys(a.cachedQuota).length > 0 ? a.cachedQuota : undefined,
         cachedQuotaUpdatedAt: a.cachedQuotaUpdatedAt,
+        statusChangedAt: a.statusChangedAt,
         verificationRequired: a.verificationRequired,
         verificationRequiredAt: a.verificationRequiredAt,
         verificationRequiredReason: a.verificationRequiredReason,
         verificationUrl: a.verificationUrl,
+        revokedAt: a.revokedAt,
       })),
       activeIndex: claudeIndex,
       activeIndexByFamily: {
@@ -1239,25 +1309,6 @@ export class AccountManager {
         gemini: geminiIndex,
       },
     };
-  }
-
-  async persistAccountRemoval(refreshToken: string): Promise<void> {
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-      this.saveTimeout = null;
-    }
-    this.savePending = false;
-
-    const storage = this.createStorageSnapshot();
-
-    try {
-      await this.enqueueStorageOperation(async () => {
-        await saveAccounts(storage);
-        await removeAccountFromStorage(refreshToken);
-      });
-    } finally {
-      this.resolveSavePromises();
-    }
   }
 
   private enqueueStorageOperation(operation: () => Promise<void>): Promise<void> {
@@ -1277,14 +1328,56 @@ export class AccountManager {
     }
   }
 
-  requestSaveToDisk(): void {
-    if (this.savePending) {
+  /**
+   * Schedules a debounced save. A pending save is moved earlier when a more
+   * urgent one is requested, never later.
+   */
+  requestSaveToDisk(delayMs = 1000): void {
+    if (this.disposed) {
       return;
     }
+    const dueAt = nowMs() + delayMs;
+    if (this.savePending) {
+      if (dueAt >= this.saveDueAt || !this.saveTimeout) {
+        return;
+      }
+      clearTimeout(this.saveTimeout);
+    }
     this.savePending = true;
+    this.saveDueAt = dueAt;
     this.saveTimeout = setTimeout(() => {
       void this.executeSave();
-    }, 1000);
+    }, delayMs);
+  }
+
+  /**
+   * Stops background saves and writes a pending change once. Called when the
+   * pool is torn down (credentials changed, plugin unloaded) so a replaced
+   * manager does not keep writing its copy of the pool.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    const pending = this.savePending;
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    this.savePending = false;
+    try {
+      if (this.activeSave) {
+        await this.activeSave;
+      }
+      if (pending) {
+        await this.saveToDisk();
+      }
+    } catch (error) {
+      log.warn("Failed to save the account pool on shutdown", { error: String(error) });
+    } finally {
+      this.resolveSavePromises();
+    }
   }
 
   async flushSaveToDisk(): Promise<void> {
@@ -1308,11 +1401,20 @@ export class AccountManager {
     this.savePending = false;
     this.saveTimeout = null;
 
+    let failed = false;
     const savePromise = (async () => {
       try {
         await this.saveToDisk();
-      } catch {
-        // best-effort persistence; avoid unhandled rejection from timer-driven saves
+        this.consecutiveSaveFailures = 0;
+      } catch (error) {
+        // Timer-driven, so never reject. A locked or unreadable pool file is
+        // retried with backoff instead of losing the change.
+        failed = true;
+        this.consecutiveSaveFailures += 1;
+        log.warn("Failed to save the account pool; will retry", {
+          attempt: this.consecutiveSaveFailures,
+          error: String(error),
+        });
       }
     })();
     this.activeSave = savePromise;
@@ -1324,6 +1426,9 @@ export class AccountManager {
         this.activeSave = null;
       }
       this.resolveSavePromises();
+    }
+    if (failed) {
+      this.requestSaveToDisk(Math.min(60_000, 1000 * 2 ** this.consecutiveSaveFailures));
     }
   }
 

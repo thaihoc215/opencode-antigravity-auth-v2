@@ -214,7 +214,7 @@ For details on variant configuration and thinking levels, see [docs/MODEL-VARIAN
 
 Add multiple Google accounts for a higher combined quota. The plugin automatically rotates between accounts when one is rate-limited. Accounts live in a pool file (`antigravity-accounts.json`) owned by the plugin.
 
-### Sign in: `opencode auth login`
+### Sign in
 
 ```bash
 opencode auth login google --method antigravity
@@ -247,14 +247,14 @@ Add `--no-browser` on headless machines and `--help` for the full list. The menu
 - **Select an account** → *Verify account access*, *Enable/Disable account* (stays in the pool, skipped during rotation), *Refresh token*, *Delete this account*
 - **Delete all accounts**
 
-Run `opencode service restart` after changing accounts with the CLI; the server reads the pool at startup.
+A running server applies enable/disable, verification and deletions the next time it saves the pool (on its next request at the latest). New accounts load when it restarts: `opencode service restart`.
 
 ### Log out completely
 
-1. CLI → **Delete all accounts** (removes the pool file)
-2. `opencode auth logout` — removes OpenCode's own copy of the last sign-in. If you skip this, the next start re-seeds the pool from it.
+1. CLI → **Delete all accounts** (empties the pool and records the deleted accounts, so a running server cannot write them back)
+2. `opencode auth logout` — removes OpenCode's own copy of the last sign-in, which otherwise keeps the google provider connected
 
-Deleting a single account with the CLI is enough on its own: while the pool file exists, it is authoritative.
+Deleting a single account with the CLI is enough on its own: the pool file is authoritative.
 
 For details on load balancing, dual quota pools, and account storage, see [docs/MULTI-ACCOUNT.md](docs/MULTI-ACCOUNT.md).
 
@@ -262,7 +262,7 @@ For details on load balancing, dual quota pools, and account storage, see [docs/
 
 ## Troubleshooting
 
-> **Quick Reset**: Most issues can be resolved by deleting `~/.config/opencode/antigravity-accounts.json` and running `opencode auth login` again.
+> **Quick Reset**: Most issues can be resolved by deleting `~/.config/opencode/antigravity-accounts.json` and running `opencode auth login google --method antigravity` again.
 
 ### Configuration Path (All Platforms)
 
@@ -293,7 +293,7 @@ If you encounter authentication issues with multiple accounts:
    ```
 2. Re-authenticate:
    ```bash
-   opencode auth login
+   opencode auth login google --method antigravity
    ```
 
 ---
@@ -331,18 +331,7 @@ Permission 'cloudaicompanion.companions.generateChat' denied on resource
 
 ### Gemini Model Not Found
 
-Add this to your `google` provider config:
-
-```json
-{
-  "provider": {
-    "google": {
-      "npm": "@ai-sdk/google",
-      "models": { ... }
-    }
-  }
-}
-```
+Use an id from `opencode models google`. The plugin points the `google` provider at its own AI SDK module and registers the models itself, so no `npm` override or model list is needed in `opencode.json`. Removed families (Gemini 2.5, 3 Pro/Flash, 3.1 Flash, 3.5–3.7 Flash) are not offered.
 
 ---
 
@@ -365,11 +354,6 @@ Invalid JSON payload received. Unknown name "parameters" at 'request.tools[0]'
    ```
 
 2. **Disable MCP servers** one-by-one to find the problematic one
-
-3. **Add npm override:**
-   ```json
-   { "provider": { "google": { "npm": "@ai-sdk/google" } } }
-   ```
 
 ---
 
@@ -464,7 +448,7 @@ If you encounter errors during a session:
 2. **Disable HTTPS-Only Mode temporarily:**
    - Safari > Settings (⌘,) > Privacy
    - Uncheck "Enable HTTPS-Only Mode"
-   - Run `opencode auth login`
+   - Run `opencode auth login google --method antigravity`
    - Re-enable after authentication
 
 </details>
@@ -481,14 +465,14 @@ lsof -i :51121
 kill -9 <PID>
 
 # Retry
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 **Windows (PowerShell):**
 ```powershell
 netstat -ano | findstr :51121
 taskkill /PID <PID> /F
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 </details>
@@ -595,7 +579,6 @@ Most users don't need to configure anything — defaults work well.
 
 | Option | Default | What it does |
 |--------|---------|--------------
-| `keep_thinking` | `false` | Preserve Claude's thinking across turns. **Warning:** enabling may degrade model stability. |
 | `cli_first` | `false` | Route Gemini models to the legacy Gemini CLI path first (Claude and image models stay on Antigravity). |
 | `agy_sdk.enabled` | `true` | Enables the Antigravity SDK / Gemini API key route for Gemini requests. |
 | `agy_sdk.prefer_for_gemini` | `false` | When API keys are configured, use the Gemini API route before OAuth-backed Antigravity for Gemini models. |
@@ -646,7 +629,7 @@ Set `prefer_for_gemini: true` if you want Gemini models to use the newer Gemini 
 | `quota_refresh_interval_minutes` | `15` | Background quota refresh interval. After successful API requests, refreshes quota cache if older than this interval. Set to `0` to disable. |
 | `soft_quota_cache_ttl_minutes` | `"auto"` | How long quota cache is considered fresh. `"auto"` = max(2 × refresh interval, 10 minutes). Set a number (1-120) for fixed TTL. |
 
-> **How it works**: Quota cache is refreshed automatically after API requests (when older than `quota_refresh_interval_minutes`) and manually via "Check quotas" in `opencode auth login`. The threshold check uses `soft_quota_cache_ttl_minutes` to determine cache freshness - if cache is older, the account is considered "unknown" and allowed (fail-open). When ALL accounts exceed the threshold, the plugin waits for the earliest quota reset time (like rate limit behavior). If wait time exceeds `max_rate_limit_wait_seconds`, it errors immediately.
+> **How it works**: Quota cache is refreshed automatically after API requests (when older than `quota_refresh_interval_minutes`) and manually via **Check quotas** in the account manager CLI (`bunx opencode-antigravity-auth`).The threshold check uses `soft_quota_cache_ttl_minutes` to determine cache freshness - if cache is older, the account is considered "unknown" and allowed (fail-open). When ALL accounts exceed the threshold, the plugin waits for the earliest quota reset time (like rate limit behavior). If wait time exceeds `max_rate_limit_wait_seconds`, it errors immediately.
 
 ### Rate Limit Scheduling
 
@@ -667,7 +650,6 @@ Control how the plugin handles rate limits:
 
 | Option | Default | What it does |
 |--------|---------|--------------|
-| `quiet_mode` | `false` | Hide toast notifications |
 | `debug` | `false` | Enable debug file logging (`~/.config/opencode/antigravity-logs/`) |
 | `debug_tui` | `false` | Add the request's debug lines to the model's thinking output and error messages (independent from `debug`) |
 

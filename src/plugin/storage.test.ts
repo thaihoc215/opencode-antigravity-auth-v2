@@ -3,7 +3,10 @@ import {
   deduplicateAccountsByEmail,
   migrateV2ToV3,
   loadAccounts,
+  hashRefreshToken,
   removeAccountFromStorage,
+  removeAllAccountsFromStorage,
+  replaceAccountPool,
   saveAccounts,
   type AccountMetadata,
   type AccountStorage,
@@ -1281,5 +1284,175 @@ describe("saveAccounts merge — cleared rate limits are not resurrected", () =>
       expect(merged.accounts[0]?.rateLimitResetTimes?.claude).toBe(1000);
       expect(merged.accounts[0]?.rateLimitSetTimes?.claude).toBe(200);
     });
+  });
+});
+
+describe("pool writes from the CLI and a running server", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function mockDiskContent(content: string): void {
+    vi.mocked(fs.readFile).mockImplementation((path) => {
+      if ((path as string).endsWith(".gitignore")) {
+        const error = new Error("ENOENT") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        return Promise.reject(error);
+      }
+      return Promise.resolve(content);
+    });
+    vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+    vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+    vi.mocked(fs.rename).mockResolvedValue(undefined);
+  }
+
+  function written(): AccountStorageV4 | undefined {
+    const tmpCall = vi.mocked(fs.writeFile).mock.calls.find(
+      (call) => (call[0] as string).includes(".tmp"),
+    );
+    return tmpCall ? (JSON.parse(tmpCall[1] as string) as AccountStorageV4) : undefined;
+  }
+
+  const fingerprint = (deviceId: string, createdAt: number) => ({
+    deviceId,
+    sessionToken: "s",
+    userAgent: "antigravity/1.0.0 win32/x64",
+    apiClient: "c",
+    clientMetadata: { ideType: "ANTIGRAVITY", platform: "WINDOWS", pluginType: "GEMINI" },
+    createdAt,
+  });
+
+  it("keeps an account the CLI disabled when the server saves an older copy", async () => {
+    mockDiskContent(JSON.stringify({
+      version: 4,
+      accounts: [{ email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 5, enabled: false, statusChangedAt: 200 }],
+      activeIndex: 0,
+    }));
+
+    const merged = await saveAccounts({
+      version: 4,
+      accounts: [{ email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 9, enabled: true, statusChangedAt: 100 }],
+      activeIndex: 0,
+    });
+
+    expect(written()?.accounts[0]?.enabled).toBe(false);
+    expect(merged.accounts[0]?.statusChangedAt).toBe(200);
+    expect(merged.accounts[0]?.lastUsed).toBe(9);
+  });
+
+  it("applies the newer status change, including verification flags", async () => {
+    mockDiskContent(JSON.stringify({
+      version: 4,
+      accounts: [{ refreshToken: "r1", addedAt: 1, lastUsed: 5, enabled: true, statusChangedAt: 100 }],
+      activeIndex: 0,
+    }));
+
+    await saveAccounts({
+      version: 4,
+      accounts: [{
+        refreshToken: "r1",
+        addedAt: 1,
+        lastUsed: 5,
+        enabled: false,
+        statusChangedAt: 300,
+        verificationRequired: true,
+        verificationUrl: "https://accounts.google.com/x",
+      }],
+      activeIndex: 0,
+    });
+
+    const account = written()?.accounts[0];
+    expect(account?.enabled).toBe(false);
+    expect(account?.verificationRequired).toBe(true);
+    expect(account?.verificationUrl).toBe("https://accounts.google.com/x");
+  });
+
+  it("settles on the newer device fingerprint whichever side saves", async () => {
+    mockDiskContent(JSON.stringify({
+      version: 4,
+      accounts: [{ refreshToken: "r1", addedAt: 1, lastUsed: 5, fingerprint: fingerprint("newer", 200) }],
+      activeIndex: 0,
+    }));
+
+    await saveAccounts({
+      version: 4,
+      accounts: [{ refreshToken: "r1", addedAt: 1, lastUsed: 5, fingerprint: fingerprint("older", 100) }],
+      activeIndex: 0,
+    });
+
+    expect(written()?.accounts[0]?.fingerprint?.deviceId).toBe("newer");
+  });
+
+  it("refuses to overwrite a pool file it cannot parse", async () => {
+    mockDiskContent("{ not json");
+
+    await expect(saveAccounts({
+      version: 4,
+      accounts: [{ refreshToken: "r1", addedAt: 1, lastUsed: 1 }],
+      activeIndex: 0,
+    })).rejects.toThrow();
+    expect(written()).toBeUndefined();
+  });
+
+  it("treats an empty pool file as an empty pool", async () => {
+    mockDiskContent("");
+
+    await saveAccounts({
+      version: 4,
+      accounts: [{ refreshToken: "r1", addedAt: 1, lastUsed: 1 }],
+      activeIndex: 0,
+    });
+
+    expect(written()?.accounts.map((account) => account.refreshToken)).toEqual(["r1"]);
+  });
+
+  it("tombstones every account that a fresh pool replaces", async () => {
+    mockDiskContent(JSON.stringify({
+      version: 4,
+      accounts: [
+        { refreshToken: "old", addedAt: 1, lastUsed: 1 },
+        { refreshToken: "kept", addedAt: 1, lastUsed: 1 },
+      ],
+      activeIndex: 1,
+    }));
+
+    await replaceAccountPool({
+      version: 4,
+      accounts: [{ refreshToken: "kept", addedAt: 1, lastUsed: 1 }],
+      activeIndex: 3,
+    });
+
+    const result = written();
+    expect(result?.accounts.map((account) => account.refreshToken)).toEqual(["kept"]);
+    expect(result?.activeIndex).toBe(0);
+    expect(result?.deletedRefreshTokenHashes).toEqual([hashRefreshToken("old")]);
+  });
+
+  it("deletes all accounts with tombstones a stale server save cannot undo", async () => {
+    mockDiskContent(JSON.stringify({
+      version: 4,
+      accounts: [
+        { refreshToken: "r1", addedAt: 1, lastUsed: 1 },
+        { refreshToken: "r2", addedAt: 1, lastUsed: 1 },
+      ],
+      activeIndex: 0,
+    }));
+
+    await removeAllAccountsFromStorage();
+    const cleared = written();
+    expect(cleared?.accounts).toEqual([]);
+
+    // A server still holding both accounts saves its copy afterwards.
+    vi.mocked(fs.writeFile).mockClear();
+    mockDiskContent(JSON.stringify(cleared));
+    await saveAccounts({
+      version: 4,
+      accounts: [
+        { refreshToken: "r1", addedAt: 1, lastUsed: 2 },
+        { refreshToken: "r2", addedAt: 1, lastUsed: 2 },
+      ],
+      activeIndex: 0,
+    });
+    expect(written()?.accounts).toEqual([]);
   });
 });

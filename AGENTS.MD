@@ -82,20 +82,25 @@ No linter or formatter is configured. Style is enforced by convention (see below
 
 ```
 src/
-├── v2/                      # OpenCode V2 adapter: plugin entry, ctx → core mapping, account CLI
-├── plugin.ts                # Host-agnostic core: fetch interceptor, account rotation, login
+├── v2/                      # OpenCode V2 adapter: plugin entry, ctx → core mapping, CLI entry
+├── cli/                     # Account manager CLI (menu, prompts, opencode.json updater); never loaded by the server
+├── plugin.ts                # Host-agnostic core: createAntigravityCore (models, google_search, lifecycle)
 ├── constants.ts             # Endpoints, headers, API config, system prompts
-├── antigravity/oauth.ts     # OAuth token exchange
+├── antigravity/oauth.ts     # OAuth URL (random state, PKCE) and token exchange
 └── plugin/
+    ├── router.ts            # Request routing: account selection, retries, endpoint fallback
+    ├── oauth-flow.ts        # Sign-in shared by the integration and the CLI; writes the pool
+    ├── verification.ts      # Google account verification (403 detection, probe)
+    ├── paths.ts             # Config directory resolution (single source)
     ├── auth.ts              # Token validation & refresh
     ├── request.ts           # Request transformation (core logic)
     ├── request-helpers.ts   # Schema cleaning, thinking filters
     ├── thinking-recovery.ts # Turn boundary detection
     ├── recovery.ts          # Recoverable error classification
     ├── quota.ts             # Quota checking (API usage stats)
-    ├── cache.ts             # Auth & signature caching
-    ├── accounts.ts          # Multi-account management & storage
-    ├── storage.ts           # Persistent storage schemas (Zod)
+    ├── cache.ts             # Signature caching
+    ├── accounts.ts          # Multi-account management (in-memory pool)
+    ├── storage.ts           # Pool file: locking, merging, tombstones
     ├── fingerprint.ts       # Device fingerprint generation & headers
     ├── project.ts           # Managed project context resolution
     └── debug.ts             # Debug logging utilities
@@ -128,12 +133,14 @@ Per-account device fingerprints stored in `antigravity-accounts.json`. Each fing
 - `@ai-sdk/google` — AI SDK provider the plugin hands to OpenCode
 - `@openauthjs/openauth` — OAuth client
 - `proper-lockfile` — file locking for concurrent access
+- `jsonc-parser` — edits opencode.jsonc in place (CLI)
 
 ## Testing
 
 - Framework: **Vitest 3** with native ESM
 - Config: `vitest.config.ts`
 - Tests colocated: `src/plugin/foo.test.ts` next to `src/plugin/foo.ts`
+- `vitest.setup.ts` points every run at a temporary config directory; tests never touch the real ~/.config/opencode
 - Use `describe`/`it`/`expect` — standard Vitest API
 - Mock with `vi.fn()`, `vi.spyOn()`, `vi.mock()`
 

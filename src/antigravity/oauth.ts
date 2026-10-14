@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { generatePKCE } from "@openauthjs/openauth/pkce";
 
 import {
@@ -15,23 +16,25 @@ import { calculateTokenExpiry } from "../plugin/auth";
 
 const log = createLogger("oauth");
 
-interface PkcePair {
-  challenge: string;
-  verifier: string;
-}
-
-interface AntigravityAuthState {
-  verifier: string;
-  projectId: string;
-}
-
 /**
  * Result returned to the caller after constructing an OAuth authorization URL.
  */
 export interface AntigravityAuthorization {
   url: string;
+  /**
+   * Random value sent as the OAuth `state`. A callback must return it, which
+   * ties the redirect to this sign-in.
+   */
+  state: string;
+  /** PKCE secret. It stays in this process and never appears in the URL. */
   verifier: string;
   projectId: string;
+}
+
+/** The parameters a sign-in callback (redirect URL or pasted code) carries. */
+export interface OAuthCallbackParams {
+  code: string;
+  state: string;
 }
 
 interface AntigravityTokenExchangeSuccess {
@@ -63,34 +66,14 @@ interface AntigravityUserInfo {
 }
 
 /**
- * Encode an object into a URL-safe base64 string.
- */
-function encodeState(payload: AntigravityAuthState): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-}
-
-/**
- * Decode an OAuth state parameter back into its structured representation.
- */
-function decodeState(state: string): AntigravityAuthState {
-  const normalized = state.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
-  const json = Buffer.from(padded, "base64").toString("utf8");
-  const parsed = JSON.parse(json);
-  if (typeof parsed.verifier !== "string") {
-    throw new Error("Missing PKCE verifier in state");
-  }
-  return {
-    verifier: parsed.verifier,
-    projectId: typeof parsed.projectId === "string" ? parsed.projectId : "",
-  };
-}
-
-/**
  * Build the Antigravity OAuth authorization URL including PKCE and optional project metadata.
  */
-export async function authorizeAntigravity(projectId = ""): Promise<AntigravityAuthorization> {
-  const pkce = (await generatePKCE()) as PkcePair;
+export async function authorizeAntigravity(
+  projectId = "",
+  options: { loginHint?: string } = {},
+): Promise<AntigravityAuthorization> {
+  const pkce = await generatePKCE();
+  const state = randomBytes(32).toString("base64url");
 
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.searchParams.set("client_id", ANTIGRAVITY_CLIENT_ID);
@@ -99,15 +82,16 @@ export async function authorizeAntigravity(projectId = ""): Promise<AntigravityA
   url.searchParams.set("scope", ANTIGRAVITY_SCOPES.join(" "));
   url.searchParams.set("code_challenge", pkce.challenge);
   url.searchParams.set("code_challenge_method", "S256");
-  url.searchParams.set(
-    "state",
-    encodeState({ verifier: pkce.verifier, projectId: projectId || "" }),
-  );
+  url.searchParams.set("state", state);
   url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
+  if (options.loginHint) {
+    url.searchParams.set("login_hint", options.loginHint);
+  }
 
   return {
     url: url.toString(),
+    state,
     verifier: pkce.verifier,
     projectId: projectId || "",
   };
@@ -196,17 +180,27 @@ async function fetchProjectID(accessToken: string): Promise<string> {
 }
 
 /**
- * Exchange an authorization code for Antigravity CLI access and refresh tokens.
+ * Exchange the code of a sign-in callback for access and refresh tokens. A
+ * callback whose `state` is not the one `authorization` sent is refused: it
+ * belongs to another sign-in, or to a page trying to slip its own Google
+ * account into the pool.
  */
 export async function exchangeAntigravity(
-  code: string,
-  state: string,
+  authorization: AntigravityAuthorization,
+  callback: OAuthCallbackParams,
 ): Promise<AntigravityTokenExchangeResult> {
+  if (callback.state !== authorization.state) {
+    return {
+      type: "failed",
+      error: "The sign-in redirect does not belong to this sign-in (state mismatch). Start the sign-in again.",
+    };
+  }
   try {
-    const { verifier, projectId } = decodeState(state);
+    const { verifier, projectId } = authorization;
+    const code = callback.code;
 
     const startTime = Date.now();
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    const tokenResponse = await fetchWithTimeout("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
@@ -231,7 +225,7 @@ export async function exchangeAntigravity(
 
     const tokenPayload = (await tokenResponse.json()) as AntigravityTokenResponse;
 
-    const userInfoResponse = await fetch(
+    const userInfoResponse = await fetchWithTimeout(
       "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
       {
         headers: {

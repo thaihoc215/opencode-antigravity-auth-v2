@@ -2,24 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProactiveRefreshQueue } from "./refresh-queue";
 import { AccountManager } from "./accounts";
 import type { AccountStorageV4 } from "./storage";
-import type { OAuthAuthDetails, PluginClient } from "./types";
-import { refreshAccessToken } from "./token";
+import type { OAuthAuthDetails } from "./types";
+import { AntigravityTokenRefreshError, refreshAccessToken } from "./token";
 
-vi.mock("./token", () => ({
+vi.mock("./token", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./token")>()),
   refreshAccessToken: vi.fn(),
 }));
 
 const mockedRefresh = vi.mocked(refreshAccessToken);
-
-// Mock PluginClient
-const mockClient: PluginClient = {
-  toast: vi.fn(),
-  auth: {
-    get: vi.fn(),
-    set: vi.fn(),
-    remove: vi.fn(),
-  },
-} as unknown as PluginClient;
 
 describe("ProactiveRefreshQueue", () => {
   beforeEach(() => {
@@ -58,7 +49,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -97,7 +88,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -131,7 +122,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -164,7 +155,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800, // 30 minutes
         checkIntervalSeconds: 300,
@@ -199,7 +190,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -285,7 +276,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -322,6 +313,41 @@ describe("ProactiveRefreshQueue", () => {
       expect(failureTracking.size).toBe(0);
     });
 
+    it("disables an account whose sign-in Google revoked", async () => {
+      const now = Date.now();
+      const manager = new AccountManager(undefined, {
+        version: 4,
+        accounts: [
+          { email: "a@example.com", refreshToken: "r1", projectId: "p1", addedAt: now, lastUsed: 0, enabled: true },
+          { email: "b@example.com", refreshToken: "r2", projectId: "p2", addedAt: now, lastUsed: 0, enabled: true },
+        ],
+        activeIndex: 0,
+      });
+      vi.spyOn(manager, "saveToDisk").mockResolvedValue();
+      const queue = new ProactiveRefreshQueue({ enabled: true, bufferSeconds: 1800, checkIntervalSeconds: 300 });
+      queue.setAccountManager(manager);
+      manager.getAccounts().forEach((acc) => {
+        acc.expires = now + 1000 * 60 * 10;
+      });
+      (queue as unknown as { state: { isRunning: boolean } }).state.isRunning = true;
+
+      mockedRefresh
+        .mockRejectedValueOnce(new AntigravityTokenRefreshError({
+          message: "revoked",
+          code: "invalid_grant",
+          status: 400,
+          statusText: "Bad Request",
+        }))
+        .mockResolvedValueOnce({ type: "oauth", refresh: "r2|p2", access: "fresh", expires: now + 3_600_000 });
+      await (queue as unknown as { runRefreshCheck: () => Promise<void> }).runRefreshCheck();
+
+      const [revoked, healthy] = manager.getAccounts();
+      expect(revoked).toMatchObject({ enabled: false });
+      expect(revoked?.revokedAt).toBeTypeOf("number");
+      expect(healthy).toMatchObject({ enabled: true, access: "fresh" });
+      await manager.dispose();
+    });
+
     it("prunes failure-tracking entries for accounts removed from the manager", async () => {
       const now = Date.now();
       const stored: AccountStorageV4 = {
@@ -335,7 +361,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -360,7 +386,7 @@ describe("ProactiveRefreshQueue", () => {
       expect(failureTracking.has("r2")).toBe(true);
 
       // Remove the "r1" account; its identity no longer exists.
-      expect(manager.removeAccountByIndex(0)).toBe(true);
+      (manager as unknown as { accounts: unknown[] }).accounts.splice(0, 1);
       // Keep the surviving account a refresh candidate.
       manager.getAccounts().forEach((acc) => {
         acc.expires = withinBuffer;

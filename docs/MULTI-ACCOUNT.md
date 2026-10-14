@@ -3,7 +3,7 @@
 Add multiple Google accounts to increase your combined quota and improve availability. The plugin automatically rotates between accounts when one is rate-limited.
 
 ```bash
-opencode auth login  # Run again to add more accounts
+opencode auth login google --method antigravity  # Run again to add more accounts
 ```
 
 ---
@@ -46,7 +46,7 @@ Automatic fallback between pools is always enabled for Gemini requests.
 Check your current API usage across all accounts:
 
 ```bash
-opencode auth login
+opencode auth login google --method antigravity
 # Select "Check quotas" from the menu
 ```
 
@@ -72,7 +72,7 @@ node scripts/check-quota.mjs --path /path/to/accounts.json  # Custom path
 Enable or disable specific accounts to control which ones are used for requests:
 
 ```bash
-opencode auth login
+opencode auth login google --method antigravity
 # Select "Manage accounts (enable/disable)"
 ```
 
@@ -92,17 +92,11 @@ Useful when:
 
 ## Adding Accounts
 
-When running `opencode auth login` with existing accounts:
+`opencode auth login google --method antigravity` asks for an **Action** before the browser opens: **Add a new account** (the default) keeps the existing accounts, and **Re-authenticate `<email>`** signs one of them in again.
 
-```
-2 account(s) saved:
-  1. user1@gmail.com
-  2. user2@gmail.com
+The account manager CLI (`bunx opencode-antigravity-auth`) adds several accounts in a row (**Add account**). Its plain-text menu, shown when the terminal is not interactive, also offers **(f)resh start**, which replaces the whole pool with the accounts you sign in next.
 
-(a)dd new account(s) or (f)resh start? [a/f]:
-```
-
-Choose `a` to add more accounts while keeping existing ones.
+A running OpenCode picks up what the account manager changes (added accounts, enable/disable, sign-ins, deletions) within a second; no restart is needed. All projects open in one OpenCode server share the same pool, so rate limits seen in one project apply to the others.
 
 ---
 
@@ -151,14 +145,12 @@ Accounts are stored in `~/.config/opencode/antigravity-accounts.json`:
 
 ## Token Revocation
 
-If Google revokes a token (e.g., password change, security event), you'll see `invalid_grant` errors. The plugin automatically removes invalid accounts.
+If Google revokes a token (e.g., password change, security event, long inactivity), the refresh fails with `invalid_grant`. The plugin disables that account and keeps it in the pool, marked as signed out (`[signed out - refresh token]` in the account manager, "signed out by Google" in OpenCode's sign-in form). Sign it in again to enable it, with its project and settings intact:
 
-To manually reset:
+- account manager CLI: select the account, then **Refresh token**
+- OpenCode: `opencode auth login google --method antigravity`, then **Re-authenticate `<email>`**
 
-```bash
-rm ~/.config/opencode/antigravity-accounts.json
-opencode auth login
-```
+Enabling a signed-out account without signing in again is refused, since its token no longer works. To drop it instead, delete it in the account manager.
 
 ---
 
@@ -176,7 +168,7 @@ When using oh-my-opencode with parallel subagents, multiple processes may select
 
 This distributes sessions across accounts based on process ID.
 
-Alternatively, add more accounts via `opencode auth login`.
+Alternatively, add more accounts via `opencode auth login google --method antigravity`.
 
 ---
 

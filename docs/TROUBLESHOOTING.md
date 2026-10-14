@@ -2,7 +2,7 @@
 
 Solutions to common issues with the Antigravity Auth plugin.
 
-> **Quick Reset**: Most issues can be resolved by deleting `~/.config/opencode/antigravity-accounts.json` and running `opencode auth login` again.
+> **Quick Reset**: Most issues can be resolved by deleting `~/.config/opencode/antigravity-accounts.json` and running `opencode auth login google --method antigravity` again.
 
 ---
 
@@ -27,7 +27,7 @@ OpenCode uses `~/.config/opencode/` on **all platforms** including Windows.
 Delete the accounts file and re-authenticate:
 ```bash
 rm ~/.config/opencode/antigravity-accounts.json
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 ### "This version of Antigravity is no longer supported"
@@ -52,7 +52,7 @@ Stop-Process -Name "opencode" -Force -ErrorAction SilentlyContinue
 rm -f ~/.config/opencode/antigravity-accounts.json
 rm -rf ~/.cache/opencode/node_modules/opencode-antigravity-auth
 rm -rf ~/.bun/install/cache/opencode-antigravity-auth*
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 **Windows (PowerShell):**
@@ -60,7 +60,7 @@ opencode auth login
 Remove-Item "$env:APPDATA\opencode\antigravity-accounts.json" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:LOCALAPPDATA\opencode\Cache\node_modules\opencode-antigravity-auth" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.bun\install\cache\opencode-antigravity-auth*" -Recurse -Force -ErrorAction SilentlyContinue
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 ### Behavior doesn't match the version you just installed/built
@@ -84,10 +84,7 @@ This is a different cache path than the `node_modules`/`.bun` ones cleared in th
 supported" fix below — clear both if you're not sure which one is stale.
 
 ### "Model not found"
-Add this to your `google` provider config:
-```json
-"npm": "@ai-sdk/google"
-```
+Use an id from `opencode models google`. The plugin points the `google` provider at its own AI SDK module and registers the models itself; an `npm` override in `opencode.json` is not needed (it was a 1.x workaround). Removed families (Gemini 2.5, 3 Pro/Flash, 3.1 Flash, 3.5–3.7 Flash) are not offered.
 
 ### Session errors
 Retry the request, or use `/undo` to roll back.
@@ -190,11 +187,6 @@ Invalid JSON payload received. Unknown name "parameters" at 'request.tools[0]'
 
 2. **Disable MCP servers** one-by-one to find the problematic one
 
-3. **Add npm override:**
-   ```json
-   { "provider": { "google": { "npm": "@ai-sdk/google" } } }
-   ```
-
 ---
 
 ## MCP Servers Causing Errors
@@ -258,7 +250,7 @@ Users have reported success with this approach:
 - Use shorter sessions
 - Avoid parallel/retry-heavy workflows (e.g., spawning many subagents at once)
 - If using oh-my-opencode, consider reducing concurrent agent spawns
-- Set `max_rate_limit_wait_seconds: 0` to fail fast instead of retrying
+- Lower `max_rate_limit_wait_seconds` (default `30`) to fail sooner instead of waiting for a rate-limited account; `0` waits indefinitely
 
 </details>
 
@@ -274,7 +266,7 @@ If you only have one account, you'll likely have a better experience using [Anti
 
 If adding new accounts:
 1. Delete accounts file: `rm ~/.config/opencode/antigravity-accounts.json`
-2. Re-authenticate: `opencode auth login`
+2. Re-authenticate: `opencode auth login google --method antigravity`
 3. Update to latest beta: `"plugins": [{ "package": "opencode-antigravity-auth@beta" }]`
 4. Consider "warming up" the account in Antigravity IDE first
 
@@ -311,12 +303,12 @@ If you're seeing unusual rate limit behavior, please share in a [GitHub issue](h
 **Solutions:**
 
 1. **Use a different browser** (easiest):
-   Copy the URL from `opencode auth login` and paste it into Chrome or Firefox.
+   Copy the URL from `opencode auth login google --method antigravity` and paste it into Chrome or Firefox.
 
 2. **Temporarily disable HTTPS-Only Mode:**
    - Safari > Settings (⌘,) > Privacy
    - Uncheck "Enable HTTPS-Only Mode"
-   - Run `opencode auth login`
+   - Run `opencode auth login google --method antigravity`
    - Re-enable after authentication
 
 3. **Manual callback extraction** (advanced):
@@ -333,14 +325,14 @@ If OAuth fails with "Address already in use":
 ```bash
 lsof -i :51121
 kill -9 <PID>
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 **Windows:**
 ```powershell
 netstat -ano | findstr :51121
 taskkill /PID <PID> /F
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 ---

@@ -5,22 +5,12 @@ import type { AccountStorageV4 } from "./storage";
 import type { OAuthAuthDetails } from "./types";
 import * as storageModule from "./storage";
 
-// Promise.withResolvers is Node 22+; CI and `engines` target Node 20.
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 // Mock storage to prevent test data from leaking to real config files
 vi.mock("./storage", async (importOriginal) => {
   const original = await importOriginal<typeof import("./storage")>();
   return {
     ...original,
+    loadAccounts: vi.fn(original.loadAccounts),
     saveAccounts: vi.fn().mockResolvedValue(undefined),
     saveAccountsReplace: vi.fn().mockResolvedValue(undefined),
     removeAccountFromStorage: vi.fn().mockResolvedValue(undefined),
@@ -243,9 +233,9 @@ describe("AccountManager", () => {
     expect(fifth?.parts.refreshToken).toBe("r2");
   });
 
-  it("removes an account and keeps cursor consistent", () => {
+  it("disables a revoked account, keeps it, and moves the selection off it", () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(0));
+    vi.setSystemTime(new Date(5));
 
     const stored: AccountStorageV4 = {
       version: 4,
@@ -263,11 +253,16 @@ describe("AccountManager", () => {
     const picked = manager.getCurrentOrNextForFamily(family);
     expect(picked?.parts.refreshToken).toBe("r2");
 
-    manager.removeAccount(picked!);
+    manager.markAccountRevoked(picked!);
+    expect(manager.getTotalAccountCount()).toBe(3);
     expect(manager.getAccountCount()).toBe(2);
+    expect(picked?.enabled).toBe(false);
+    expect(picked?.revokedAt).toBe(5);
+    expect(picked?.statusChangedAt).toBe(5);
+    expect(manager.areAllAccountsRevoked()).toBe(false);
 
-    const next = manager.getNextForFamily(family);
-    expect(next?.parts.refreshToken).toBe("r3");
+    const next = manager.getCurrentOrNextForFamily(family);
+    expect(next?.parts.refreshToken).not.toBe("r2");
   });
 
   it("attaches fallback access tokens only to the matching stored account", () => {
@@ -294,31 +289,6 @@ describe("AccountManager", () => {
     expect(snapshot[0]?.expires).toBeUndefined();
     expect(snapshot[1]?.access).toBe("access-2");
     expect(snapshot[1]?.expires).toBe(123);
-  });
-
-  it("debounces toast display for same account", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(0));
-
-    const stored: AccountStorageV4 = {
-      version: 4,
-      accounts: [
-        { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
-      ],
-      activeIndex: 0,
-    };
-
-    const manager = new AccountManager(undefined, stored);
-
-    expect(manager.shouldShowAccountToast(0)).toBe(true);
-    manager.markToastShown(0);
-
-    expect(manager.shouldShowAccountToast(0)).toBe(false);
-
-    expect(manager.shouldShowAccountToast(1)).toBe(true);
-
-    vi.setSystemTime(new Date(31000));
-    expect(manager.shouldShowAccountToast(0)).toBe(true);
   });
 
   describe("header style fallback for Gemini", () => {
@@ -1187,34 +1157,6 @@ describe("AccountManager", () => {
       saveSpy.mockRestore();
     });
 
-    it("waits for an in-flight save before persisting a revoked-account removal", async () => {
-      const staleSave = deferred<void>();
-      vi.mocked(storageModule.saveAccounts).mockImplementationOnce(async () => staleSave.promise);
-      vi.mocked(storageModule.removeAccountFromStorage).mockClear();
-      const stored: AccountStorageV4 = {
-        version: 4,
-        accounts: [
-          { refreshToken: "revoked", projectId: "p1", addedAt: 1, lastUsed: 0 },
-          { refreshToken: "valid", projectId: "p2", addedAt: 2, lastUsed: 0 },
-        ],
-        activeIndex: 0,
-      };
-      const manager = new AccountManager(undefined, stored);
-      const account = manager.getAccounts()[0];
-      if (!account) throw new Error("Revoked account not found");
-
-      const inFlightSave = manager.saveToDisk();
-      await vi.waitFor(() => expect(storageModule.saveAccounts).toHaveBeenCalledOnce());
-      manager.removeAccount(account);
-      const removal = manager.persistAccountRemoval("revoked");
-      await Promise.resolve();
-
-      expect(storageModule.removeAccountFromStorage).not.toHaveBeenCalled();
-      staleSave.resolve();
-      await inFlightSave;
-      await removal;
-      expect(storageModule.removeAccountFromStorage).toHaveBeenCalledWith("revoked");
-    });
   });
 
   describe("Rate Limit Reason Classification", () => {
@@ -2249,5 +2191,141 @@ describe("resolveQuotaGroup", () => {
     // Even if family says claude, model determines the quota group
     expect(resolveQuotaGroup("gemini", "gemini-2.5-flash")).toBe("gemini-flash");
     expect(resolveQuotaGroup("gemini", "gemini-3-pro")).toBe("gemini-pro");
+  });
+});
+
+describe("AccountManager picks up other writers' changes", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.mocked(storageModule.saveAccounts).mockReset();
+  });
+
+  const stored = (): AccountStorageV4 => ({
+    version: 4,
+    accounts: [
+      { email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 0, enabled: true, statusChangedAt: 100 },
+      { email: "b@example.com", refreshToken: "r2", addedAt: 1, lastUsed: 0, enabled: true },
+    ],
+    activeIndex: 0,
+  });
+
+  it("disables an account the CLI disabled since the pool was loaded", async () => {
+    const manager = new AccountManager(undefined, stored());
+    const onDisk = stored();
+    onDisk.accounts[0] = { ...onDisk.accounts[0]!, enabled: false, statusChangedAt: 200 };
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue(onDisk);
+
+    await manager.saveToDisk();
+
+    expect(manager.getAccounts()[0]?.enabled).toBe(false);
+    expect(manager.getAccountCount()).toBe(1);
+  });
+
+  it("keeps its own newer status change", async () => {
+    const manager = new AccountManager(undefined, stored());
+    manager.setAccountEnabled(0, false);
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue(stored());
+
+    await manager.saveToDisk();
+    await manager.dispose();
+
+    expect(manager.getAccounts()[0]?.enabled).toBe(false);
+  });
+
+  it("stops using an account deleted on disk without renumbering", async () => {
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [stored().accounts[1]!],
+      activeIndex: 0,
+      deletedRefreshTokenHashes: [storageModule.hashRefreshToken("r1")],
+    });
+
+    await manager.saveToDisk();
+
+    expect(manager.getAccounts().map((account) => [account.index, account.enabled])).toEqual([
+      [0, false],
+      [1, true],
+    ]);
+  });
+
+  it("saves a revoked account as disabled with revokedAt, right away", async () => {
+    vi.useFakeTimers();
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue(stored());
+
+    manager.markAccountRevoked(manager.getAccounts()[1]!);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const saved = vi.mocked(storageModule.saveAccounts).mock.calls[0]?.[0];
+    expect(saved?.accounts[1]).toMatchObject({ refreshToken: "r2", enabled: false });
+    expect(saved?.accounts[1]?.revokedAt).toBeTypeOf("number");
+    await manager.dispose();
+  });
+
+  it("reports when every account was revoked", async () => {
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue(stored());
+    for (const account of manager.getAccounts()) {
+      manager.markAccountRevoked(account);
+    }
+    expect(manager.areAllAccountsRevoked()).toBe(true);
+    expect(manager.getAccountCount()).toBe(0);
+    await manager.dispose();
+  });
+
+  it("syncFromDisk appends accounts added on disk and retires a re-signed-in entry", async () => {
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.loadAccounts).mockResolvedValueOnce({
+      version: 4,
+      accounts: [
+        // a@example.com signed in again: new token, same email
+        { email: "a@example.com", refreshToken: "r1-new", addedAt: 1, lastUsed: 5 },
+        stored().accounts[1]!,
+        { email: "c@example.com", refreshToken: "r3", addedAt: 9, lastUsed: 0 },
+      ],
+      activeIndex: 0,
+    });
+
+    await manager.syncFromDisk();
+
+    expect(
+      manager.getAccounts().map((account) => [account.index, account.parts.refreshToken, account.enabled]),
+    ).toEqual([
+      [0, "r1", false],
+      [1, "r2", true],
+      [2, "r1-new", true],
+      [3, "r3", true],
+    ]);
+  });
+
+  it("syncFromDisk adopts a revocation recorded by another process", async () => {
+    const manager = new AccountManager(undefined, stored());
+    const onDisk = stored();
+    onDisk.accounts[1] = { ...onDisk.accounts[1]!, enabled: false, revokedAt: 300, statusChangedAt: 300 };
+    vi.mocked(storageModule.loadAccounts).mockResolvedValueOnce(onDisk);
+
+    await manager.syncFromDisk();
+
+    expect(manager.getAccounts()[1]).toMatchObject({ enabled: false, revokedAt: 300 });
+  });
+
+  it("retries a failed background save and stops after dispose", async () => {
+    vi.useFakeTimers();
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.saveAccounts)
+      .mockRejectedValueOnce(new Error("ELOCKED"))
+      .mockResolvedValue(stored());
+
+    manager.requestSaveToDisk();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(storageModule.saveAccounts).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(storageModule.saveAccounts).toHaveBeenCalledTimes(2);
+
+    await manager.dispose();
+    manager.requestSaveToDisk();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(storageModule.saveAccounts).toHaveBeenCalledTimes(2);
   });
 });

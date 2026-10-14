@@ -119,6 +119,8 @@ export function updateFingerprintVersion(fingerprint: Fingerprint): boolean {
 /**
  * Build HTTP headers from a fingerprint object.
  * These headers are used to identify the "device" making API requests.
+ * The client version is always the current one: a long-running server
+ * picks up newer versions without regenerating fingerprints.
  */
 export function buildFingerprintHeaders(fingerprint: Fingerprint | null): Partial<FingerprintHeaders> {
   if (!fingerprint) {
@@ -126,7 +128,7 @@ export function buildFingerprintHeaders(fingerprint: Fingerprint | null): Partia
   }
 
   return {
-    "User-Agent": fingerprint.userAgent,
+    "User-Agent": fingerprint.userAgent.replace(/^(antigravity\/)[\d.]+/, `$1${getAntigravityVersion()}`),
   };
 }
 

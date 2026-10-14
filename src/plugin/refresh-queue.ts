@@ -17,8 +17,8 @@
  */
 
 import type { AccountManager, ManagedAccount } from "./accounts";
-import type { PluginClient, OAuthAuthDetails } from "./types";
-import { refreshAccessToken } from "./token";
+import type { OAuthAuthDetails } from "./types";
+import { AntigravityTokenRefreshError, refreshAccessToken } from "./token";
 import { createLogger } from "./logger";
 
 const log = createLogger("refresh-queue");
@@ -80,8 +80,6 @@ interface RefreshQueueState {
  */
 export class ProactiveRefreshQueue {
   private readonly config: ProactiveRefreshConfig;
-  private readonly client: PluginClient;
-  private readonly providerId: string;
   private accountManager: AccountManager | null = null;
 
   /**
@@ -100,13 +98,9 @@ export class ProactiveRefreshQueue {
     errorCount: 0,
   };
 
-  constructor(
-    client: PluginClient,
-    providerId: string,
-    config?: Partial<ProactiveRefreshConfig>,
-  ) {
-    this.client = client;
-    this.providerId = providerId;
+  private initialCheck: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(config?: Partial<ProactiveRefreshConfig>) {
     this.config = {
       ...DEFAULT_PROACTIVE_REFRESH_CONFIG,
       ...config,
@@ -322,6 +316,15 @@ export class ProactiveRefreshQueue {
           }
         } catch (error) {
           this.state.errorCount++;
+          if (error instanceof AntigravityTokenRefreshError && error.code === "invalid_grant") {
+            // Revoked sign-in: disable the account until it is signed in again.
+            this.accountManager.markAccountRevoked(account);
+            log.warn("Google revoked an account's sign-in; it is disabled until signed in again", {
+              accountIndex: account.index,
+              email: account.email ?? "unknown",
+            });
+            continue;
+          }
           this.recordRefreshFailure(account, Date.now());
           // Log but don't throw - continue with other accounts
           log.warn("Failed to refresh account", {
@@ -352,7 +355,7 @@ export class ProactiveRefreshQueue {
       minutesUntilExpiry,
     });
 
-    return refreshAccessToken(auth, this.client, this.providerId);
+    return refreshAccessToken(auth);
   }
 
   /**
@@ -377,7 +380,8 @@ export class ProactiveRefreshQueue {
     });
 
     // Run initial check after a short delay (let things settle)
-    setTimeout(() => {
+    this.initialCheck = setTimeout(() => {
+      this.initialCheck = null;
       if (this.state.isRunning) {
         this.runRefreshCheck().catch((error) => {
           log.error("Initial check failed", {
@@ -386,6 +390,7 @@ export class ProactiveRefreshQueue {
         });
       }
     }, 5000);
+    this.initialCheck.unref?.();
 
     // Set up periodic checks
     this.state.intervalHandle = setInterval(() => {
@@ -395,6 +400,7 @@ export class ProactiveRefreshQueue {
         });
       });
     }, intervalMs);
+    this.state.intervalHandle.unref?.();
   }
 
   /**
@@ -407,6 +413,10 @@ export class ProactiveRefreshQueue {
 
     this.state.isRunning = false;
 
+    if (this.initialCheck) {
+      clearTimeout(this.initialCheck);
+      this.initialCheck = null;
+    }
     if (this.state.intervalHandle) {
       clearInterval(this.state.intervalHandle);
       this.state.intervalHandle = null;
@@ -443,10 +453,6 @@ export class ProactiveRefreshQueue {
 /**
  * Create a proactive refresh queue instance.
  */
-export function createProactiveRefreshQueue(
-  client: PluginClient,
-  providerId: string,
-  config?: Partial<ProactiveRefreshConfig>,
-): ProactiveRefreshQueue {
-  return new ProactiveRefreshQueue(client, providerId, config);
+export function createProactiveRefreshQueue(config?: Partial<ProactiveRefreshConfig>): ProactiveRefreshQueue {
+  return new ProactiveRefreshQueue(config);
 }

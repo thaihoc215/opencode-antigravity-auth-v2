@@ -1,5 +1,5 @@
 import { extractVariantThinkingConfig } from "./request-helpers";
-import { applyGeminiTransforms, isGemini3Model, isImageGenerationModel, mapAntigravityModelToPublicApi, resolveModelForHeaderStyle, restoreGeminiMaxOutputTokens } from "./transform";
+import { applyGeminiTransforms, isGemini3Model, mapAntigravityModelToPublicApi, resolveModelForHeaderStyle, restoreGeminiMaxOutputTokens } from "./transform";
 import { getPublicGeminiApiModelIds } from "./model-catalog";
 import type { AntigravityConfig } from "./config";
 import type { GeminiApiModel } from "./config/models";
@@ -220,7 +220,7 @@ export function isAgySdkSupportedRequest(urlString: string): boolean {
   }
   if (url.hostname !== "generativelanguage.googleapis.com") return false;
   const model = extractGeminiModelFromUrl(url.toString());
-  if (!model || !model.toLowerCase().includes("gemini") || isImageGenerationModel(model)) return false;
+  if (!model || !model.toLowerCase().includes("gemini")) return false;
   return canRouteAsPublicGeminiApiModel(model);
 }
 

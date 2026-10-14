@@ -1,31 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ANSI } from './ansi';
-
-function formatRelativeTime(timestamp: number | undefined): string {
-  if (!timestamp) return 'never';
-  const days = Math.floor((Date.now() - timestamp) / 86400000);
-  if (days === 0) return 'today';
-  if (days === 1) return 'yesterday';
-  if (days < 7) return `${days}d ago`;
-  if (days < 30) return `${Math.floor(days / 7)}w ago`;
-  return new Date(timestamp).toLocaleDateString();
-}
-
-function formatDate(timestamp: number | undefined): string {
-  if (!timestamp) return 'unknown';
-  return new Date(timestamp).toLocaleDateString();
-}
-
-type AccountStatus = 'active' | 'rate-limited' | 'expired' | 'unknown';
-
-function getStatusBadge(status: AccountStatus | undefined): string {
-  switch (status) {
-    case 'active': return `${ANSI.green}[active]${ANSI.reset}`;
-    case 'rate-limited': return `${ANSI.yellow}[rate-limited]${ANSI.reset}`;
-    case 'expired': return `${ANSI.red}[expired]${ANSI.reset}`;
-    default: return '';
-  }
-}
+import { formatDate, formatRelativeTime, getStatusBadge } from './auth-menu';
 
 describe('auth-menu helpers', () => {
   describe('formatRelativeTime', () => {
@@ -87,9 +62,15 @@ describe('auth-menu helpers', () => {
       expect(badge).toContain(ANSI.yellow);
     });
 
-    it('returns red badge for expired status', () => {
+    it('returns red badge for expired (revoked) status', () => {
       const badge = getStatusBadge('expired');
-      expect(badge).toContain('[expired]');
+      expect(badge).toContain('[signed out - refresh token]');
+      expect(badge).toContain(ANSI.red);
+    });
+
+    it('returns red badge for accounts needing verification', () => {
+      const badge = getStatusBadge('verification-required');
+      expect(badge).toContain('[needs verification]');
       expect(badge).toContain(ANSI.red);
     });
 

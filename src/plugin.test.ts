@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { PluginClient } from "./plugin/types";
+import type { GetAuth } from "./plugin/types";
 import { AccountManager } from "./plugin/accounts";
 
 // Mock storage so disk reads/writes are isolated from real config files.
@@ -16,18 +16,35 @@ vi.mock("./plugin/storage", async (importOriginal) => {
     saveAccounts: vi.fn(async () => undefined),
     saveAccountsReplace: vi.fn(async () => undefined),
     removeAccountFromStorage: vi.fn(async () => undefined),
-    clearAccounts: vi.fn(async () => undefined),
+    removeAllAccountsFromStorage: vi.fn(async () => undefined),
   };
 });
 
-const { createAntigravityPlugin, loopEscapeTestHooks } = await import("./plugin");
+const { createAntigravityCore, loopEscapeTestHooks } = await import("./plugin");
 const storageModule = await import("./plugin/storage");
 const { resetPublicGeminiApiModelCatalogForTests } = await import("./plugin/model-catalog");
 const { resetAgySdkCredentialStateForTests } = await import("./plugin/api-key");
 
-const client = {
-  tui: { showToast: vi.fn(async () => undefined) },
-} as unknown as PluginClient;
+/** Routes and cores built by a test; disposed after it so no background save outlives the test. */
+const disposables: Array<{ dispose(): Promise<void> }> = [];
+
+/** Builds the core with `getAuth` as the host's credential and loads its route. */
+async function loadRoute(
+  getAuth: GetAuth,
+  onAccountsRevoked?: () => Promise<void>,
+  options?: Record<string, unknown>,
+) {
+  const core = await createAntigravityCore({ directory: process.cwd(), getAuth, onAccountsRevoked, options });
+  const route = await core.loader();
+  disposables.push(...(route ? [route] : []), core);
+  return route;
+}
+
+afterEach(async () => {
+  for (const item of disposables.splice(0).reverse()) {
+    await item.dispose();
+  }
+});
 
 // models() discovery (exercised by some tests below) populates the
 // module-level live model catalog as a side effect. Reset it after every test
@@ -37,7 +54,7 @@ afterEach(() => {
   resetPublicGeminiApiModelCatalogForTests();
 });
 
-describe("createAntigravityPlugin models", () => {
+describe("createAntigravityCore models", () => {
   it("merges discovered models into the static definitions", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
       const url = String(input);
@@ -58,12 +75,12 @@ describe("createAntigravityPlugin models", () => {
     }));
 
     try {
-      const plugin = await createAntigravityPlugin("google")({
-        client,
+      const core = await createAntigravityCore({
         directory: process.cwd(),
+        getAuth: async () => ({ type: "api", key: "secret" }),
       });
 
-      const models = await plugin.models({ type: "api", key: "secret" });
+      const models = await core.models();
 
       expect(models["gemini-driver"]).toMatchObject({
         name: "Gemini Driver (Gemini API)",
@@ -75,21 +92,14 @@ describe("createAntigravityPlugin models", () => {
     }
   });
 
-  it("does not expose API-key auth secret as loader apiKey", async () => {
-    const plugin = await createAntigravityPlugin("google")({
-      client,
-      directory: process.cwd(),
-    });
+  it("routes Gemini API-key auth without an OAuth account", async () => {
+    const loader = await loadRoute(async () => ({ type: "api", key: "secret" }));
 
-    const loader = await plugin.auth.loader(
-      async () => ({ type: "api", key: "secret" }),
-    );
-
-    expect(loader).toMatchObject({ apiKey: "" });
+    expect(loader?.fetch).toBeTypeOf("function");
   });
 });
 
-describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
+describe("createAntigravityCore loader disk OAuth promotion", () => {
   beforeEach(() => {
     vi.mocked(storageModule.loadAccounts).mockReset();
     vi.mocked(storageModule.saveAccountsReplace).mockReset();
@@ -134,17 +144,11 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     try {
-      const plugin = await createAntigravityPlugin("google")({
-        client,
-        directory: process.cwd(),
-      });
 
-      const loader = await plugin.auth.loader(
+      const loader = await loadRoute(
         async () => ({ type: "api", key: "secret" }),
       );
 
-      // Both branches return apiKey: "" — this only confirms loader was constructed.
-      expect(loader).toMatchObject({ apiKey: "" });
       expect(loader).toHaveProperty("fetch");
 
       // Before the fix: this URL took the API-key-only branch and returned a
@@ -191,12 +195,8 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     }));
 
     try {
-      const plugin = await createAntigravityPlugin("google")({
-        client,
-        directory: process.cwd(),
-      });
 
-      const loader = await plugin.auth.loader(
+      const loader = await loadRoute(
         async () => ({ type: "api", key: "secret" }),
       );
 
@@ -219,13 +219,14 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     delete process.env.GEMINI_API_KEY;
     delete process.env.GOOGLE_API_KEY;
     vi.mocked(storageModule.loadAccounts).mockResolvedValue(null);
-    vi.mocked(storageModule.clearAccounts).mockClear();
+    vi.mocked(storageModule.removeAllAccountsFromStorage).mockClear();
+    vi.mocked(storageModule.removeAccountFromStorage).mockClear();
 
-    const plugin = await createAntigravityPlugin("google")({ client, directory: process.cwd() });
-    const loader = await plugin.auth.loader(async () => ({ type: "none" }));
+    const loader = await loadRoute(async () => ({ type: "none" }));
 
-    expect(loader).toEqual({});
-    expect(storageModule.clearAccounts).not.toHaveBeenCalled();
+    expect(loader).toBeUndefined();
+    expect(storageModule.removeAllAccountsFromStorage).not.toHaveBeenCalled();
+    expect(storageModule.removeAccountFromStorage).not.toHaveBeenCalled();
   });
 
   it("uses Gemini CLI when Antigravity soft quota is exhausted", async () => {
@@ -281,11 +282,7 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     }));
 
     try {
-      const plugin = await createAntigravityPlugin("google")({
-        client,
-        directory: process.cwd(),
-      });
-      const loader = await plugin.auth.loader(
+      const loader = await loadRoute(
         async () => ({
           type: "oauth",
           refresh: formatRefreshParts({
@@ -351,11 +348,7 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("unexpected", { status: 500 })));
 
     try {
-      const plugin = await createAntigravityPlugin("google")({
-        client,
-        directory: process.cwd(),
-      });
-      const loader = await plugin.auth.loader(
+      const loader = await loadRoute(
         async () => ({
           type: "oauth",
           refresh: formatRefreshParts({
@@ -373,7 +366,9 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
           { method: "POST", body: "{}" },
         ),
-      ).rejects.toThrow("All 1 account(s) rate-limited for gemini");
+      ).rejects.toThrow(
+        /All 1 account\(s\) rate-limited for gemini-2\.5-pro \(test@example\.com\)\..*raise max_rate_limit_wait_seconds \(now 1s\)/,
+      );
 
       expect(aggregateSpy).toHaveBeenCalledWith(
         "gemini",
@@ -396,11 +391,10 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     }
   });
 
-  it("does NOT call client.auth.set when promoted-from-disk OAuth hits invalid_grant", async () => {
-    // Disk holds an OAuth account; OpenCode hands us api-key auth. After my fix,
-    // when the (only) promoted OAuth account fails with invalid_grant, the plugin
-    // must NOT call client.auth.set — OpenCode is in api-key mode for this provider
-    // and clearing OAuth credentials would corrupt that state.
+  it("does not report revoked credentials when promoted-from-disk OAuth hits invalid_grant", async () => {
+    // Disk holds an OAuth account; OpenCode hands us api-key auth. When the
+    // (only) promoted OAuth account fails with invalid_grant, OpenCode's
+    // api-key connection is fine and must not be marked as needing sign-in.
     vi.mocked(storageModule.loadAccounts).mockResolvedValue({
       version: 4,
       accounts: [
@@ -432,25 +426,15 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    // Local client with auth.set as a spy so we can assert it was NOT called.
-    const authSetSpy = vi.fn(async () => undefined);
-    const localClient = {
-      tui: { showToast: vi.fn(async () => undefined) },
-        auth: { set: authSetSpy },
-    } as unknown as PluginClient;
+    const onAccountsRevoked = vi.fn(async () => undefined);
+    vi.mocked(storageModule.saveAccounts).mockClear();
+    vi.mocked(storageModule.removeAccountFromStorage).mockClear();
 
     try {
-      const plugin = await createAntigravityPlugin("google")({
-        client: localClient,
-        directory: process.cwd(),
-      });
+      const loader = await loadRoute(async () => ({ type: "api", key: "secret" }), onAccountsRevoked);
 
-      const loader = await plugin.auth.loader(
-        async () => ({ type: "api", key: "secret" }),
-      );
-
-      // Drive the OAuth fetch handler through the invalid_grant cleanup path.
-      // It will throw "All Antigravity accounts have invalid refresh tokens...".
+      // Drive the OAuth fetch handler through the invalid_grant path.
+      // It will throw "Google revoked the sign-in of every Antigravity account...".
       try {
         await (loader as { fetch: typeof fetch }).fetch(
           "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.1-pro:generateContent",
@@ -467,10 +451,102 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
       );
       expect(tokenRefreshCalls.length).toBeGreaterThan(0);
 
-      // CRITICAL: client.auth.set must NOT have been called — doing so would
-      // wipe OpenCode's api-key auth for the google provider.
-      expect(authSetSpy).not.toHaveBeenCalled();
-      expect(storageModule.removeAccountFromStorage).toHaveBeenCalledWith("fake-refresh-token");
+      expect(onAccountsRevoked).not.toHaveBeenCalled();
+      // The account is kept, disabled and marked revoked, so it can be signed in again.
+      expect(storageModule.removeAccountFromStorage).not.toHaveBeenCalled();
+      await vi.waitFor(() => {
+        const saved = vi.mocked(storageModule.saveAccounts).mock.calls.at(-1)?.[0];
+        expect(saved?.accounts[0]).toMatchObject({ refreshToken: "fake-refresh-token", enabled: false });
+        expect(saved?.accounts[0]?.revokedAt).toBeTypeOf("number");
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries an empty response on the same endpoint, counting attempts per request", async () => {
+    const now = Date.now();
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [{
+        email: "test@example.com",
+        refreshToken: "refresh-token",
+        projectId: "project-id",
+        managedProjectId: "managed-project-id",
+        addedAt: now,
+        lastUsed: now,
+        enabled: true,
+      }],
+      activeIndex: 0,
+    });
+    const generateCalls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes(":generateContent")) {
+        generateCalls.push(url);
+        const candidates = generateCalls.length === 1
+          ? []
+          : [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }];
+        return Response.json({ response: { candidates } });
+      }
+      return new Response("1.2.3");
+    }));
+
+    try {
+      const loader = await loadRoute(
+        async () => ({
+          type: "oauth",
+          refresh: formatRefreshParts({ refreshToken: "refresh-token", projectId: "project-id", managedProjectId: "managed-project-id" }),
+          access: "access-token",
+          expires: now + 3_600_000,
+        }),
+        undefined,
+        { empty_response_retry_delay_ms: 500,agy_sdk: { enabled: false, prefer_for_gemini: false, api_key_fallback: false, cloud_projects: [] } },
+      );
+
+      const response = await loader!.fetch(
+        "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.1-pro:generateContent",
+        { method: "POST", body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }] }) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(generateCalls).toHaveLength(2);
+      expect(generateCalls[1]).toBe(generateCalls[0]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("asks the host for a new sign-in when its OAuth credential's accounts are all revoked", async () => {
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [
+        { email: "test@example.com", refreshToken: "fake-refresh-token", projectId: "fake-project", addedAt: 0, lastUsed: 0, enabled: true },
+      ],
+      activeIndex: 0,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo) => {
+      if (String(input).includes("oauth2.googleapis.com")) {
+        return new Response(
+          JSON.stringify({ error: "invalid_grant", error_description: "revoked" }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("1.2.3");
+    }));
+    const onAccountsRevoked = vi.fn(async () => undefined);
+
+    try {
+      const loader = await loadRoute(
+        async () => ({ type: "oauth", refresh: "fake-refresh-token|fake-project", access: "", expires: 0 }),
+        onAccountsRevoked,
+      );
+
+      await expect(loader!.fetch(
+        "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.1-pro:generateContent",
+        { method: "POST", body: "{}" },
+      )).rejects.toThrow("Google revoked the sign-in of every Antigravity account");
+      expect(onAccountsRevoked).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -484,7 +560,7 @@ describe("createAntigravityPlugin auth.loader disk OAuth promotion", () => {
 // ---------------------------------------------------------------------------
 import { formatRefreshParts } from "./plugin/auth";
 
-describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
+describe("createAntigravityCore loader 404→agy-sdk fallback", () => {
   // Isolated XDG_CONFIG_HOME so the real user config file is never loaded.
   // Without a config file, schema defaults apply: agy_sdk.enabled=true,
   // agy_sdk.api_key_fallback=true.
@@ -652,13 +728,9 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     const fetchMock = buildFetchMock({ hasFallbackKey: true });
     vi.stubGlobal("fetch", fetchMock);
 
-    const plugin = await createAntigravityPlugin("google")({
-      client,
-      directory: process.cwd(),
-    });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth);
+    const loader = await loadRoute(getAuth);
 
     // antigravity-gemini-3.8-flash is routable (strips to gemini-3.8-flash which is
     // a public API model), so isAgySdkSupportedRequest returns true.
@@ -711,13 +783,9 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     const fetchMock = buildFetchMock({ hasFallbackKey: false });
     vi.stubGlobal("fetch", fetchMock);
 
-    const plugin = await createAntigravityPlugin("google")({
-      client,
-      directory: process.cwd(),
-    });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth);
+    const loader = await loadRoute(getAuth);
 
     const requestUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
@@ -752,13 +820,9 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     const fetchMock = buildFetchMock({ hasFallbackKey: true, backendStatus: 403 });
     vi.stubGlobal("fetch", fetchMock);
 
-    const plugin = await createAntigravityPlugin("google")({
-      client,
-      directory: process.cwd(),
-    });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth);
+    const loader = await loadRoute(getAuth);
 
     const requestUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
@@ -807,13 +871,9 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const plugin = await createAntigravityPlugin("google")({
-      client,
-      directory: process.cwd(),
-    });
 
     const getAuth = buildOAuthGetAuth();
-    const loader = await plugin.auth.loader(getAuth);
+    const loader = await loadRoute(getAuth);
 
     const requestUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash:streamGenerateContent?alt=sse";
@@ -839,7 +899,7 @@ describe("createAntigravityPlugin auth.loader 404→agy-sdk fallback", () => {
   });
 });
 
-describe("createAntigravityPlugin capacity-exhaustion header-style fallback (review fix 1)", () => {
+describe("createAntigravityCore capacity-exhaustion header-style fallback (review fix 1)", () => {
   let tmpConfigHome: string;
   const savedEnv: Record<string, string | undefined> = {};
 
@@ -961,11 +1021,7 @@ describe("createAntigravityPlugin capacity-exhaustion header-style fallback (rev
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const plugin = await createAntigravityPlugin("google")({
-      client,
-      directory: process.cwd(),
-    });
-    const loader = await plugin.auth.loader(
+    const loader = await loadRoute(
       async () => ({
         type: "oauth" as const,
         refresh: formatRefreshParts({
@@ -1061,8 +1117,7 @@ describe("createAntigravityPlugin capacity-exhaustion header-style fallback (rev
       });
 
     try {
-      const plugin = await createAntigravityPlugin("google")({ client, directory: process.cwd() });
-      const loader = await plugin.auth.loader(
+      const loader = await loadRoute(
         async () => ({
           type: "oauth" as const,
           refresh: formatRefreshParts({ refreshToken: "refresh-A", projectId: "proj", managedProjectId: "managed" }),
@@ -1186,7 +1241,7 @@ describe("replaceStoredAccount", () => {
   });
 
   it("replaces the entry in place without merging the old one back", async () => {
-    const { replaceStoredAccount } = await import("./plugin");
+    const { replaceStoredAccount } = await import("./plugin/oauth-flow");
 
     await replaceStoredAccount(1, signIn);
 
@@ -1206,7 +1261,7 @@ describe("replaceStoredAccount", () => {
   });
 
   it("tombstones the old refresh token so a running server cannot restore it", async () => {
-    const { replaceStoredAccount } = await import("./plugin");
+    const { replaceStoredAccount } = await import("./plugin/oauth-flow");
 
     await replaceStoredAccount(1, signIn);
 
@@ -1215,7 +1270,7 @@ describe("replaceStoredAccount", () => {
   });
 
   it("does not tombstone a refresh token that Google returned unchanged", async () => {
-    const { replaceStoredAccount } = await import("./plugin");
+    const { replaceStoredAccount } = await import("./plugin/oauth-flow");
 
     await replaceStoredAccount(1, { ...signIn, refresh: "token-b-old" });
 

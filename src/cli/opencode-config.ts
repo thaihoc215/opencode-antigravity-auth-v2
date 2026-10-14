@@ -1,13 +1,16 @@
 /**
- * OpenCode configuration file updater.
+ * OpenCode configuration file updater (account manager CLI).
  *
- * Registers the plugin in ~/.config/opencode/opencode.json(c) for OpenCode V2.
+ * Registers the plugin in the OpenCode config directory's opencode.json(c) for
+ * OpenCode V2. Existing files are edited in place, so comments and formatting
+ * in opencode.jsonc survive.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
-import { OPENCODE_MODEL_DEFINITIONS } from "./models";
+import { applyEdits, modify, parse, printParseErrorCode, type ParseError } from "jsonc-parser";
+import { OPENCODE_MODEL_DEFINITIONS } from "../plugin/config/models";
+import { getConfigDir } from "../plugin/paths";
 
 // =============================================================================
 // Types
@@ -51,23 +54,7 @@ const PLUGIN_NAME = `${PACKAGE_NAME}@latest`;
 const SCHEMA_URL = "https://opencode.ai/config.json";
 const OPENCODE_JSON_FILENAME = "opencode.json";
 const OPENCODE_JSONC_FILENAME = "opencode.jsonc";
-
-function stripJsonCommentsAndTrailingCommas(json: string): string {
-  return json
-    .replace(
-      /\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g,
-      (match: string, group: string | undefined) => (group ? "" : match)
-    )
-    .replace(/,(\s*[}\]])/g, "$1");
-}
-
-/**
- * Get the opencode config directory path.
- */
-export function getOpencodeConfigDir(): string {
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
+const FORMATTING = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } };
 
 /**
  * Get the opencode config file path.
@@ -76,17 +63,13 @@ export function getOpencodeConfigDir(): string {
  * instead of creating a new opencode.json.
  */
 export function getOpencodeConfigPath(): string {
-  const configDir = getOpencodeConfigDir();
+  const configDir = getConfigDir();
   const jsoncPath = join(configDir, OPENCODE_JSONC_FILENAME);
   const jsonPath = join(configDir, OPENCODE_JSON_FILENAME);
 
   if (existsSync(jsoncPath)) {
     return jsoncPath;
   }
-  if (existsSync(jsonPath)) {
-    return jsonPath;
-  }
-
   return jsonPath;
 }
 
@@ -102,24 +85,30 @@ function entryPackage(entry: PluginEntry): string {
   return typeof entry === "string" ? entry : entry.package;
 }
 
+function parseConfig(content: string): OpencodeConfig {
+  const errors: ParseError[] = [];
+  const config = parse(content, errors, { allowTrailingComma: true }) as unknown;
+  if (errors.length > 0) {
+    const first = errors[0]!;
+    throw new Error(`Invalid JSON (${printParseErrorCode(first.error)} at offset ${first.offset})`);
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new Error("The config file does not contain a JSON object");
+  }
+  return config as OpencodeConfig;
+}
+
 /**
  * Updates the opencode configuration file for this plugin on OpenCode V2.
  *
- * This function:
- * 1. Reads existing opencode.json/opencode.jsonc (or creates default structure)
- * 2. Ensures `plugins` registers this package, moving a 1.x `plugin` entry
+ * 1. Ensures `plugins` registers this package, moving a 1.x `plugin` entry
  *    (and its version) over instead of adding a second copy
- * 3. Removes copies of the plugin's model definitions from `provider.google.models`;
- *    the plugin registers its models at runtime on V2
- * 4. Writes back to disk with proper formatting
+ * 2. Removes copies of the plugin's model definitions from
+ *    `provider.google.models`; the plugin registers its models at runtime on V2
+ * 3. Adds `$schema` when missing
  *
- * Preserves:
- * - $schema and other top-level config keys
- * - Other plugins, in either list
- * - Non-google provider sections, google settings, and the user's own google models
- *
- * @param options - Optional configuration (e.g., custom configPath for testing)
- * @returns UpdateConfigResult with success status and path
+ * Everything else (other plugins, providers, the user's own google models,
+ * comments) is left as it is.
  */
 export async function updateOpencodeConfig(
   options: UpdateConfigOptions = {}
@@ -127,63 +116,56 @@ export async function updateOpencodeConfig(
   const configPath = options.configPath ?? getOpencodeConfigPath();
 
   try {
-    let config: OpencodeConfig;
-
-    // Read existing config or create default
-    if (existsSync(configPath)) {
-      const content = readFileSync(configPath, "utf-8");
-      config = JSON.parse(stripJsonCommentsAndTrailingCommas(content)) as OpencodeConfig;
-    } else {
-      config = { $schema: SCHEMA_URL };
+    if (!existsSync(configPath)) {
+      mkdirSync(dirname(configPath), { recursive: true });
+      const config: OpencodeConfig = { $schema: SCHEMA_URL, plugins: [{ package: PLUGIN_NAME }] };
+      writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+      return { success: true, configPath };
     }
 
-    // Ensure $schema is set
+    let text = readFileSync(configPath, "utf-8");
+    const config = parseConfig(text);
+    const edit = (path: Array<string | number>, value: unknown, arrayInsert = false) => {
+      text = applyEdits(text, modify(text, path, value, { ...FORMATTING, isArrayInsertion: arrayInsert }));
+    };
+
     if (!config.$schema) {
-      config.$schema = SCHEMA_URL;
+      edit(["$schema"], SCHEMA_URL);
     }
 
     // Take our entry out of the 1.x list, remembering its version
     let legacySpec: string | undefined;
     if (Array.isArray(config.plugin)) {
       legacySpec = config.plugin.find(isOurPackage);
-      config.plugin = config.plugin.filter((spec) => !isOurPackage(spec));
-      if (config.plugin.length === 0) {
-        delete config.plugin;
+      if (legacySpec) {
+        const remaining = config.plugin.filter((spec) => !isOurPackage(spec));
+        edit(["plugin"], remaining.length > 0 ? remaining : undefined);
       }
     }
 
     // Ensure plugins registers our package (any version)
+    const entry = { package: legacySpec ?? PLUGIN_NAME };
     if (!Array.isArray(config.plugins)) {
-      config.plugins = [];
-    }
-    if (!config.plugins.some((entry) => isOurPackage(entryPackage(entry)))) {
-      config.plugins.push({ package: legacySpec ?? PLUGIN_NAME });
+      edit(["plugins"], [entry]);
+    } else if (!config.plugins.some((plugin) => isOurPackage(entryPackage(plugin)))) {
+      edit(["plugins", config.plugins.length], entry, true);
     }
 
     // Drop copies of our model definitions that the 1.x installer wrote
-    const google = config.provider?.google;
-    if (google?.models) {
-      for (const modelId of Object.keys(OPENCODE_MODEL_DEFINITIONS)) {
-        delete google.models[modelId];
-      }
-      if (Object.keys(google.models).length === 0) {
-        delete google.models;
+    const models = config.provider?.google?.models;
+    if (models && typeof models === "object") {
+      const copies = Object.keys(models).filter((id) => id in OPENCODE_MODEL_DEFINITIONS);
+      if (copies.length > 0 && copies.length === Object.keys(models).length) {
+        edit(["provider", "google", "models"], undefined);
+      } else {
+        for (const id of copies) {
+          edit(["provider", "google", "models", id], undefined);
+        }
       }
     }
 
-    // Ensure config directory exists
-    const configDir = dirname(configPath);
-    if (!existsSync(configDir)) {
-      mkdirSync(configDir, { recursive: true });
-    }
-
-    // Write config with proper formatting (2-space indent)
-    writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
-
-    return {
-      success: true,
-      configPath,
-    };
+    writeFileSync(configPath, text, "utf-8");
+    return { success: true, configPath };
   } catch (error) {
     return {
       success: false,

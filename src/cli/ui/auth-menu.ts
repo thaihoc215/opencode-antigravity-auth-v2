@@ -26,7 +26,7 @@ export type AuthMenuAction =
 
 export type AccountAction = 'back' | 'delete' | 'refresh' | 'toggle' | 'verify' | 'cancel';
 
-function formatRelativeTime(timestamp: number | undefined): string {
+export function formatRelativeTime(timestamp: number | undefined): string {
   if (!timestamp) return 'never';
   const days = Math.floor((Date.now() - timestamp) / 86400000);
   if (days === 0) return 'today';
@@ -36,16 +36,16 @@ function formatRelativeTime(timestamp: number | undefined): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
-function formatDate(timestamp: number | undefined): string {
+export function formatDate(timestamp: number | undefined): string {
   if (!timestamp) return 'unknown';
   return new Date(timestamp).toLocaleDateString();
 }
 
-function getStatusBadge(status: AccountStatus | undefined): string {
+export function getStatusBadge(status: AccountStatus | undefined): string {
   switch (status) {
     case 'active': return `${ANSI.green}[active]${ANSI.reset}`;
     case 'rate-limited': return `${ANSI.yellow}[rate-limited]${ANSI.reset}`;
-    case 'expired': return `${ANSI.red}[expired]${ANSI.reset}`;
+    case 'expired': return `${ANSI.red}[signed out - refresh token]${ANSI.reset}`;
     case 'verification-required': return `${ANSI.red}[needs verification]${ANSI.reset}`;
     default: return '';
   }

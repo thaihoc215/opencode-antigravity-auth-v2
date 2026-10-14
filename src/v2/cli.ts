@@ -3,26 +3,13 @@
  * Interactive Antigravity account manager.
  *
  * OpenCode V2 runs plugins inside its server, where an integration's OAuth
- * method cannot drive a terminal menu. This CLI runs the core's interactive
- * login flow (add, re-authenticate, enable/disable, delete accounts, check
- * quotas) against the same account pool file the plugin reads.
+ * method cannot drive a terminal menu. This CLI (src/cli/account-manager.ts)
+ * manages the same account pool file the plugin reads: add, re-authenticate,
+ * enable/disable, delete accounts, check quotas.
  *
  * Usage: bunx opencode-antigravity-auth [--no-browser] (see HELP below)
  */
-import { ANTIGRAVITY_PROVIDER_ID } from "../constants";
-import { createAntigravityPlugin } from "../plugin";
-import type { PluginClient } from "../plugin/types";
-
-const consoleClient: PluginClient = {
-  tui: {
-    async showToast({ body }) {
-      console.log(body.title ? `${body.title}: ${body.message}` : body.message);
-    },
-  },
-  // The account pool on disk is the source of truth; there is no OpenCode
-  // credential store to update from a standalone process.
-  auth: { async set() {} },
-};
+import { runAccountManager } from "../cli/account-manager";
 
 const HELP = `Antigravity account manager
 
@@ -49,11 +36,13 @@ Menu (use the arrow keys and Enter):
   Delete all accounts            Remove the whole pool
 
 After changes:
-  opencode service restart       The server reads the pool at startup
+  A running OpenCode server applies enable/disable, verification and deletions
+  on its next save of the pool. New accounts load when it restarts:
+  opencode service restart
 
 Full logout:
   1. Delete all accounts here
-  2. opencode auth logout        Otherwise OpenCode's stored credential re-seeds the pool
+  2. opencode auth logout        Removes OpenCode's stored credential
 
 Adding or re-authenticating accounts also works without this CLI:
   opencode auth login google --method antigravity
@@ -64,27 +53,7 @@ async function main(): Promise<number> {
     console.log(HELP);
     return 0;
   }
-
-  const core = await createAntigravityPlugin(ANTIGRAVITY_PROVIDER_ID)({
-    client: consoleClient,
-    directory: process.cwd(),
-  });
-  const noBrowser = process.argv.includes("--no-browser");
-  const authorization = await core.auth.login(noBrowser ? { noBrowser: "true" } : {});
-  if (authorization.method !== "auto") {
-    console.error("Unexpected authorization mode.");
-    return 1;
-  }
-  const result = await authorization.callback();
-  if (authorization.instructions) {
-    console.log(`\n${authorization.instructions}`);
-  }
-  if (result.type === "failed") {
-    console.error(result.error);
-    return 1;
-  }
-  console.log("Restart OpenCode (or its background service) to load account changes.");
-  return 0;
+  return runAccountManager({ noBrowser: process.argv.includes("--no-browser") });
 }
 
 main().then(

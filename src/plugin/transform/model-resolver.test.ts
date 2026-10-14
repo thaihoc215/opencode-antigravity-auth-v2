@@ -142,14 +142,6 @@ describe("resolveModelWithTier", () => {
       expect(result.quotaPreference).toBe("antigravity");
     });
 
-    it("keeps antigravity for image models when cli_first is true", () => {
-      const result = resolveModelWithTier("gemini-3-pro-image", {
-        cli_first: true,
-      });
-      expect(result.quotaPreference).toBe("antigravity");
-      expect(result.explicitQuota).toBe(true);
-    });
-
     it("defaults to antigravity when cli_first is false", () => {
       const result = resolveModelWithTier("gemini-3-flash", {
         cli_first: false,
@@ -256,23 +248,6 @@ describe("resolveModelWithTier", () => {
     });
   });
 
-  describe("Image models", () => {
-    it("marks antigravity-gemini-3-pro-image as explicit quota", () => {
-      const result = resolveModelWithTier("antigravity-gemini-3-pro-image");
-      expect(result.actualModel).toBe("gemini-3-pro-image");
-      expect(result.isImageModel).toBe(true);
-      expect(result.explicitQuota).toBe(true);
-      expect(result.quotaPreference).toBe("antigravity");
-    });
-
-    it("marks gemini-3-pro-image as explicit quota", () => {
-      const result = resolveModelWithTier("gemini-3-pro-image");
-      expect(result.actualModel).toBe("gemini-3-pro-image");
-      expect(result.isImageModel).toBe(true);
-      expect(result.explicitQuota).toBe(true);
-      expect(result.quotaPreference).toBe("antigravity");
-    });
-  });
 });
 
 describe("resolveModelWithVariant", () => {
@@ -447,30 +422,6 @@ describe("Issue #103: resolveModelForHeaderStyle", () => {
   });
 
   describe("quota fallback from antigravity to gemini-cli", () => {
-    it("transforms gemini-3-flash to gemini-3-flash-preview for gemini-cli", () => {
-      const result = resolveModelForHeaderStyle("gemini-3-flash", "gemini-cli");
-      expect(result.actualModel).toBe("gemini-3-flash-preview");
-      expect(result.quotaPreference).toBe("gemini-cli");
-    });
-
-    it("transforms gemini-3-pro-low to gemini-3-pro-preview for gemini-cli", () => {
-      const result = resolveModelForHeaderStyle(
-        "gemini-3-pro-low",
-        "gemini-cli",
-      );
-      expect(result.actualModel).toBe("gemini-3-pro-preview");
-      expect(result.quotaPreference).toBe("gemini-cli");
-    });
-
-    it("strips the minimal tier before adding Gemini CLI preview suffix", () => {
-      const result = resolveModelForHeaderStyle(
-        "gemini-3-flash-minimal",
-        "gemini-cli",
-      );
-      expect(result.actualModel).toBe("gemini-3-flash-preview");
-      expect(result.quotaPreference).toBe("gemini-cli");
-    });
-
     it("transforms gemini-3.1-pro-low to gemini-3.1-pro (bare) for gemini-cli", () => {
       const result = resolveModelForHeaderStyle(
         "gemini-3.1-pro-low",
@@ -495,15 +446,6 @@ describe("Issue #103: resolveModelForHeaderStyle", () => {
         "gemini-cli",
       );
       expect(result.actualModel).toBe("gemini-3.1-pro-preview-customtools");
-      expect(result.quotaPreference).toBe("gemini-cli");
-    });
-
-    it("keeps dotted 3.0 models on legacy preview suffix for gemini-cli", () => {
-      const result = resolveModelForHeaderStyle(
-        "gemini-3.0-pro-low",
-        "gemini-cli",
-      );
-      expect(result.actualModel).toBe("gemini-3.0-pro-preview");
       expect(result.quotaPreference).toBe("gemini-cli");
     });
 
@@ -577,19 +519,8 @@ describe("geminiMaxOutputTokens", () => {
     }
   });
 
-  it("reports 65535 for the 3.1 Flash Lite and 2.5 families", () => {
-    for (const model of ["gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash-thinking"]) {
-      expect(geminiMaxOutputTokens(model), `model=${model}`).toBe(65535);
-    }
-  });
-
   it("strips the antigravity prefix before matching", () => {
     expect(geminiMaxOutputTokens("antigravity-gemini-3.8-flash-high")).toBe(65536);
-  });
-
-  it("returns undefined for image models, which report no output limit", () => {
-    expect(geminiMaxOutputTokens("gemini-3.1-flash-image")).toBeUndefined();
-    expect(geminiMaxOutputTokens("gemini-3-pro-image")).toBeUndefined();
   });
 
   it("returns undefined for non-Gemini models", () => {

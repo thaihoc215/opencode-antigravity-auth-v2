@@ -7,7 +7,7 @@ import {
   type AccountInfo,
   type AccountStatus,
 } from "./ui/auth-menu";
-import { updateOpencodeConfig } from "./config/updater";
+import { updateOpencodeConfig } from "./opencode-config";
 
 export async function promptProjectId(): Promise<string> {
   const rl = createInterface({ input, output });

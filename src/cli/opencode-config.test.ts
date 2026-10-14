@@ -2,7 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { updateOpencodeConfig } from "./updater";
+import { parse } from "jsonc-parser";
+import { updateOpencodeConfig } from "./opencode-config";
 
 const OUR_ENTRY = { package: "opencode-antigravity-auth@latest" };
 
@@ -10,6 +11,7 @@ describe("updateOpencodeConfig", () => {
   let tempDir: string;
   let configPath: string;
   let originalXdgConfigHome: string | undefined;
+  let originalConfigDir: string | undefined;
 
   const readConfig = (file = configPath) => JSON.parse(fs.readFileSync(file, "utf-8"));
   const writeConfig = (config: unknown, file = configPath) => fs.writeFileSync(file, JSON.stringify(config));
@@ -18,7 +20,8 @@ describe("updateOpencodeConfig", () => {
 
   beforeEach(() => {
     originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-test-"));
+    originalConfigDir = process.env.OPENCODE_CONFIG_DIR;
+    tempDir= fs.mkdtempSync(path.join(os.tmpdir(), "opencode-test-"));
     configPath = path.join(tempDir, "opencode.json");
   });
 
@@ -27,6 +30,11 @@ describe("updateOpencodeConfig", () => {
       delete process.env.XDG_CONFIG_HOME;
     } else {
       process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+    }
+    if (originalConfigDir === undefined) {
+      delete process.env.OPENCODE_CONFIG_DIR;
+    } else {
+      process.env.OPENCODE_CONFIG_DIR = originalConfigDir;
     }
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true, force: true });
@@ -161,7 +169,7 @@ describe("updateOpencodeConfig", () => {
     expect(result.error).toBeDefined();
   });
 
-  test("parses existing jsonc config files with comments and trailing commas", async () => {
+  test("edits jsonc config files in place, keeping comments and trailing commas", async () => {
     const jsoncPath = path.join(tempDir, "opencode.jsonc");
     fs.writeFileSync(
       jsoncPath,
@@ -182,9 +190,22 @@ describe("updateOpencodeConfig", () => {
 
     expect(result.success).toBe(true);
     expect(result.configPath).toBe(jsoncPath);
-    const written = readConfig(jsoncPath);
+    const text = fs.readFileSync(jsoncPath, "utf-8");
+    expect(text).toContain("// Keep existing plugins");
+    const written = parse(text, [], { allowTrailingComma: true });
     expect(written.plugins).toEqual([{ package: "other-plugin" }, OUR_ENTRY]);
     expect(written.provider.google.region).toBe("us-central1");
+    expect(written.$schema).toBe("https://opencode.ai/config.json");
+  });
+
+  test("uses OPENCODE_CONFIG_DIR for the default config path", async () => {
+    process.env.OPENCODE_CONFIG_DIR = path.join(tempDir, "custom");
+
+    const result = await updateOpencodeConfig();
+
+    expect(result.success).toBe(true);
+    expect(result.configPath).toBe(path.join(tempDir, "custom", "opencode.json"));
+    expect(readConfig(result.configPath).plugins).toEqual([OUR_ENTRY]);
   });
 
   test("prefers existing opencode.jsonc when using default config path", async () => {

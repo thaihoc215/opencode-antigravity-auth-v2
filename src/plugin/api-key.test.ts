@@ -64,17 +64,6 @@ describe("api-key agy sdk support", () => {
     expect(retryable).toEqual([false, false, false]);
   });
 
-  it("keeps image generation requests on Antigravity", () => {
-    // Given: an image model request on the public Gemini hostname
-    const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image:generateContent";
-
-    // When: checking whether the API-key route supports it
-    const supported = isAgySdkSupportedRequest(url);
-
-    // Then: the request remains on the Antigravity-only path
-    expect(supported).toBe(false);
-  });
-
   it("loads API key credentials from auth, config cloud projects, and environment", () => {
     vi.stubEnv("GEMINI_API_KEY", "env-key");
     vi.stubEnv("GOOGLE_API_KEY", "google-key");
