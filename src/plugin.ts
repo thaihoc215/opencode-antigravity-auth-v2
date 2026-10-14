@@ -4,11 +4,9 @@ import { ensureProjectContext } from "./plugin/project";
 import { initializeDebug, shutdownDebug } from "./plugin/debug";
 import { refreshAccessToken } from "./plugin/token";
 import type { AccountManager } from "./plugin/accounts";
-import { loadConfig, initRuntimeConfig, type AntigravityConfig } from "./plugin/config";
+import { loadConfig, type AntigravityConfig } from "./plugin/config";
 import { fetchAvailableModels } from "./plugin/quota";
-import { initDiskSignatureCache, shutdownDiskSignatureCache } from "./plugin/cache";
 import { createLogger } from "./plugin/logger";
-import { initHealthTracker, initTokenTracker } from "./plugin/rotation";
 import { initAntigravityVersion } from "./plugin/version";
 import { executeSearch } from "./plugin/search";
 import { fetchGeminiApiModels, getAgySdkCredentials, isApiKeyAuth } from "./plugin/api-key";
@@ -41,6 +39,13 @@ import { GOOGLE_SEARCH_INPUT_SCHEMA } from "./plugin/types";
 const VERSION_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const log = createLogger("plugin");
+
+/**
+ * Cores alive in this process (OpenCode sets the plugin up once per project
+ * directory). The debug log is process-wide: the first core opens it, the
+ * last one to be disposed closes it.
+ */
+let liveCores = 0;
 
 async function modelsFromAgySdkCredentials(
   config: AntigravityConfig,
@@ -137,10 +142,12 @@ export async function createAntigravityCore({
 }: AntigravityCoreOptions): Promise<AntigravityCore> {
   // Load configuration from files, environment variables, and plugin options
   const config = loadConfig(directory, options);
-  initRuntimeConfig(config);
 
-  // Initialize debug with config
-  initializeDebug(config);
+  if (liveCores === 0) {
+    initializeDebug(config);
+  }
+  liveCores += 1;
+  let disposed = false;
 
   // Fetch latest Antigravity version from remote API in the background (falls back
   // to hardcoded). Plugin setup must stay fast: OpenCode V2 gives plugins a few
@@ -154,32 +161,6 @@ export async function createAntigravityCore({
 
   // The pool built by the latest loader() call; google_search uses its accounts.
   let activeAccountManager: AccountManager | null = null;
-  
-  // Initialize health tracker for hybrid strategy
-  if (config.health_score) {
-    initHealthTracker({
-      initial: config.health_score.initial,
-      successReward: config.health_score.success_reward,
-      rateLimitPenalty: config.health_score.rate_limit_penalty,
-      failurePenalty: config.health_score.failure_penalty,
-      recoveryRatePerHour: config.health_score.recovery_rate_per_hour,
-      minUsable: config.health_score.min_usable,
-      maxScore: config.health_score.max_score,
-    });
-  }
-
-  // Initialize token tracker for hybrid strategy
-  if (config.token_bucket) {
-    initTokenTracker({
-      maxTokens: config.token_bucket.max_tokens,
-      regenerationRatePerMinute: config.token_bucket.regeneration_rate_per_minute,
-      initialTokens: config.token_bucket.initial_tokens,
-    });
-  }
-  
-  // Initialize disk signature cache if keep_thinking is enabled
-  // This integrates with the in-memory cacheSignature/getCachedSignature functions
-  const diskSignatureCache = config.keep_thinking ? initDiskSignatureCache(config.signature_cache) : null;
   
   // Create google_search tool with access to auth context
   const googleSearchTool: CoreTool<GoogleSearchArgs> = {
@@ -248,9 +229,15 @@ export async function createAntigravityCore({
       google_search: googleSearchTool,
     },
     async dispose(): Promise<void> {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
       clearInterval(versionRefresh);
-      shutdownDiskSignatureCache(diskSignatureCache);
-      shutdownDebug();
+      liveCores -= 1;
+      if (liveCores === 0) {
+        shutdownDebug();
+      }
     },
     async models(): Promise<Record<string, ProviderModel>> {
       await versionReady;

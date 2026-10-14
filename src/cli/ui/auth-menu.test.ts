@@ -62,9 +62,9 @@ describe('auth-menu helpers', () => {
       expect(badge).toContain(ANSI.yellow);
     });
 
-    it('returns red badge for expired status', () => {
+    it('returns red badge for expired (revoked) status', () => {
       const badge = getStatusBadge('expired');
-      expect(badge).toContain('[expired]');
+      expect(badge).toContain('[signed out - refresh token]');
       expect(badge).toContain(ANSI.red);
     });
 

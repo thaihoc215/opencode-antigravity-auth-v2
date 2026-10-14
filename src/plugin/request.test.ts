@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   prepareAntigravityRequest,
   transformAntigravityResponse,
@@ -9,7 +9,6 @@ import { DEFAULT_CONFIG } from "./config";
 import { initializeDebug } from "./debug";
 import { SKIP_THOUGHT_SIGNATURE } from "../constants";
 import { cacheSignature, getCachedSignature, clearSignatureCache } from "./cache";
-import * as config from "./config";
 import type { SignatureStore, ThoughtBuffer, StreamingCallbacks, StreamingOptions } from "./core/streaming/types";
 
 const {
@@ -19,16 +18,8 @@ const {
   extractConversationSeedFromMessages,
   extractConversationSeedFromContents,
   resolveProjectKey,
-  isGeminiToolUsePart,
-  isGeminiThinkingPart,
-  ensureThoughtSignature,
   sanitizeRequestPayloadForAntigravity,
   signatureCacheProjectKey,
-  hasSignedThinkingPart,
-  hasToolUseInContents,
-  hasSignedThinkingInContents,
-  hasToolUseInMessages,
-  hasSignedThinkingInMessages,
   generateSyntheticProjectId,
   getDisplayedThinkingHashes,
   MIN_SIGNATURE_LENGTH,
@@ -59,15 +50,6 @@ function createMockThoughtBuffer(): ThoughtBuffer {
 const defaultCallbacks: StreamingCallbacks = {};
 const defaultOptions: StreamingOptions = {};
 const defaultDebugState = { injected: false };
-
-function withKeepThinking<T>(enabled: boolean, fn: () => T): T {
-  const keepThinkingSpy = vi.spyOn(config, "getKeepThinking").mockReturnValue(enabled);
-  try {
-    return fn();
-  } finally {
-    keepThinkingSpy.mockRestore();
-  }
-}
 
 describe("request.ts", () => {
   describe("isGenerativeLanguageRequest", () => {
@@ -205,174 +187,6 @@ describe("request.ts", () => {
     it("returns undefined if no valid candidate or fallback", () => {
       expect(resolveProjectKey(null)).toBeUndefined();
       expect(resolveProjectKey(undefined)).toBeUndefined();
-    });
-  });
-
-  describe("isGeminiToolUsePart", () => {
-    it("returns true for functionCall parts", () => {
-      expect(isGeminiToolUsePart({ functionCall: { name: "test" } })).toBe(true);
-    });
-
-    it("returns false for non-functionCall parts", () => {
-      expect(isGeminiToolUsePart({ text: "hello" })).toBe(false);
-      expect(isGeminiToolUsePart({ thought: true })).toBe(false);
-    });
-
-    it("returns false for null/undefined", () => {
-      expect(isGeminiToolUsePart(null)).toBe(false);
-      expect(isGeminiToolUsePart(undefined)).toBe(false);
-    });
-  });
-
-  describe("isGeminiThinkingPart", () => {
-    it("returns true for thought:true parts", () => {
-      expect(isGeminiThinkingPart({ thought: true, text: "thinking..." })).toBe(true);
-    });
-
-    it("returns false for thought:false parts", () => {
-      expect(isGeminiThinkingPart({ thought: false, text: "not thinking" })).toBe(false);
-    });
-
-    it("returns false for parts without thought property", () => {
-      expect(isGeminiThinkingPart({ text: "hello" })).toBe(false);
-    });
-  });
-
-  describe("ensureThoughtSignature", () => {
-    it("adds sentinel signature when no cached signature exists", () => {
-      const part = { thought: true, text: "thinking..." };
-      const result = ensureThoughtSignature(part, "no-cache-session");
-      // Now uses sentinel fallback to prevent API rejection
-      expect(result.thoughtSignature).toBe("skip_thought_signature_validator");
-    });
-
-    it("replaces untrusted thoughtSignature with sentinel", () => {
-      const existingSignature = "a".repeat(MIN_SIGNATURE_LENGTH + 10);
-      const part = { thought: true, text: "thinking...", thoughtSignature: existingSignature };
-      const result = ensureThoughtSignature(part, "session-key");
-      expect(result.thoughtSignature).toBe("skip_thought_signature_validator");
-    });
-
-    it("does not modify non-thinking parts", () => {
-      const part = { text: "regular text" };
-      const result = ensureThoughtSignature(part, "session-key");
-      expect(result.thoughtSignature).toBeUndefined();
-    });
-
-    it("returns null/undefined inputs unchanged", () => {
-      expect(ensureThoughtSignature(null, "key")).toBeNull();
-      expect(ensureThoughtSignature(undefined, "key")).toBeUndefined();
-    });
-
-    it("returns non-object inputs unchanged", () => {
-      expect(ensureThoughtSignature("string", "key")).toBe("string");
-      expect(ensureThoughtSignature(123, "key")).toBe(123);
-    });
-  });
-
-  describe("hasSignedThinkingPart", () => {
-    it("returns true for part with valid thoughtSignature", () => {
-      const part = { thought: true, thoughtSignature: "a".repeat(MIN_SIGNATURE_LENGTH) };
-      expect(hasSignedThinkingPart(part)).toBe(true);
-    });
-
-    it("returns true for type:thinking with valid signature field", () => {
-      const part = { type: "thinking", thinking: "...", signature: "a".repeat(MIN_SIGNATURE_LENGTH) };
-      expect(hasSignedThinkingPart(part)).toBe(true);
-    });
-
-    it("returns true for type:reasoning with valid signature field", () => {
-      const part = { type: "reasoning", signature: "a".repeat(MIN_SIGNATURE_LENGTH) };
-      expect(hasSignedThinkingPart(part)).toBe(true);
-    });
-
-    it("returns false for part with short signature", () => {
-      const part = { thought: true, thoughtSignature: "short" };
-      expect(hasSignedThinkingPart(part)).toBe(false);
-    });
-
-    it("returns false for part without signature", () => {
-      const part = { thought: true, text: "no signature" };
-      expect(hasSignedThinkingPart(part)).toBe(false);
-    });
-  });
-
-  describe("hasToolUseInContents", () => {
-    it("returns true when contents have functionCall", () => {
-      const contents = [
-        { role: "model", parts: [{ functionCall: { name: "test" } }] },
-      ];
-      expect(hasToolUseInContents(contents)).toBe(true);
-    });
-
-    it("returns false when no functionCall present", () => {
-      const contents = [
-        { role: "model", parts: [{ text: "hello" }] },
-      ];
-      expect(hasToolUseInContents(contents)).toBe(false);
-    });
-
-    it("handles empty contents", () => {
-      expect(hasToolUseInContents([])).toBe(false);
-    });
-  });
-
-  describe("hasSignedThinkingInContents", () => {
-    it("returns true when contents have signed thinking", () => {
-      const contents = [
-        {
-          role: "model",
-          parts: [{ thought: true, thoughtSignature: "a".repeat(MIN_SIGNATURE_LENGTH) }],
-        },
-      ];
-      expect(hasSignedThinkingInContents(contents)).toBe(true);
-    });
-
-    it("returns false when no signed thinking present", () => {
-      const contents = [
-        { role: "model", parts: [{ thought: true, text: "unsigned" }] },
-      ];
-      expect(hasSignedThinkingInContents(contents)).toBe(false);
-    });
-  });
-
-  describe("hasToolUseInMessages", () => {
-    it("returns true when messages have tool_use blocks", () => {
-      const messages = [
-        { role: "assistant", content: [{ type: "tool_use", id: "123", name: "test" }] },
-      ];
-      expect(hasToolUseInMessages(messages)).toBe(true);
-    });
-
-    it("returns false when no tool_use blocks", () => {
-      const messages = [
-        { role: "assistant", content: [{ type: "text", text: "hello" }] },
-      ];
-      expect(hasToolUseInMessages(messages)).toBe(false);
-    });
-
-    it("handles string content", () => {
-      const messages = [{ role: "assistant", content: "just text" }];
-      expect(hasToolUseInMessages(messages)).toBe(false);
-    });
-  });
-
-  describe("hasSignedThinkingInMessages", () => {
-    it("returns true when messages have signed thinking blocks", () => {
-      const messages = [
-        {
-          role: "assistant",
-          content: [{ type: "thinking", thinking: "...", signature: "a".repeat(MIN_SIGNATURE_LENGTH) }],
-        },
-      ];
-      expect(hasSignedThinkingInMessages(messages)).toBe(true);
-    });
-
-    it("returns false when thinking blocks are unsigned", () => {
-      const messages = [
-        { role: "assistant", content: [{ type: "thinking", thinking: "no sig" }] },
-      ];
-      expect(hasSignedThinkingInMessages(messages)).toBe(false);
     });
   });
 
@@ -922,8 +736,8 @@ it("removes API key headers", () => {
       expect(wrapped.request.cache_control).toEqual({ type: "ephemeral" });
     });
 
-    it("strips Claude thinking blocks when keep_thinking is false (unwrapped)", () => {
-      const result = withKeepThinking(false, () => prepareAntigravityRequest(
+    it("strips Claude thinking blocks (unwrapped)", () => {
+      const result = prepareAntigravityRequest(
         "https://generativelanguage.googleapis.com/v1beta/models/claude-opus-4-6-thinking:generateContent",
         {
           method: "POST",
@@ -945,7 +759,7 @@ it("removes API key headers", () => {
         },
         mockAccessToken,
         mockProjectId,
-      ));
+      );
 
       const wrapped = JSON.parse(result.init.body as string);
       const parts = wrapped.request.contents[0].parts as Array<Record<string, unknown>>;
@@ -957,11 +771,10 @@ it("removes API key headers", () => {
       );
 
       expect(thinkingParts).toHaveLength(0);
-      expect(result.needsSignedThinkingWarmup).toBe(false);
     });
 
-    it("strips Claude thinking blocks when keep_thinking is false (wrapped)", () => {
-      const result = withKeepThinking(false, () => prepareAntigravityRequest(
+    it("strips Claude thinking blocks (wrapped)", () => {
+      const result = prepareAntigravityRequest(
         "https://generativelanguage.googleapis.com/v1beta/models/claude-opus-4-6-thinking:generateContent",
         {
           method: "POST",
@@ -986,7 +799,7 @@ it("removes API key headers", () => {
         },
         mockAccessToken,
         mockProjectId,
-      ));
+      );
 
       const wrapped = JSON.parse(result.init.body as string);
       const parts = wrapped.request.contents[0].parts as Array<Record<string, unknown>>;
@@ -998,12 +811,11 @@ it("removes API key headers", () => {
       );
 
       expect(thinkingParts).toHaveLength(0);
-      expect(result.needsSignedThinkingWarmup).toBe(false);
     });
 
-    it("does not trust foreign Gemini thoughtSignature when keep_thinking is true", () => {
+    it("does not forward a foreign Gemini thoughtSignature to Claude", () => {
       const foreignSignature = "x".repeat(MIN_SIGNATURE_LENGTH + 8);
-      const result = withKeepThinking(true, () => prepareAntigravityRequest(
+      const result = prepareAntigravityRequest(
         "https://generativelanguage.googleapis.com/v1beta/models/claude-opus-4-6-thinking:generateContent",
         {
           method: "POST",
@@ -1025,7 +837,7 @@ it("removes API key headers", () => {
         },
         mockAccessToken,
         mockProjectId,
-      ));
+      );
 
       const wrapped = JSON.parse(result.init.body as string);
       const parts = wrapped.request.contents[0].parts as Array<Record<string, unknown>>;
@@ -1042,9 +854,9 @@ it("removes API key headers", () => {
       }
     });
 
-    it("replaces foreign Claude signatures with sentinel when keep_thinking is true", () => {
+    it("strips signed thinking blocks from Claude messages[]", () => {
       const foreignSignature = "y".repeat(MIN_SIGNATURE_LENGTH + 8);
-      const result = withKeepThinking(true, () => prepareAntigravityRequest(
+      const result = prepareAntigravityRequest(
         "https://generativelanguage.googleapis.com/v1beta/models/claude-opus-4-6-thinking:generateContent",
         {
           method: "POST",
@@ -1071,16 +883,14 @@ it("removes API key headers", () => {
         },
         mockAccessToken,
         mockProjectId,
-      ));
+      );
 
       const wrapped = JSON.parse(result.init.body as string);
       const content = wrapped.request.messages[0].content as Array<Record<string, unknown>>;
       const thinkingBlock = content.find((block) => block.type === "thinking" || block.type === "redacted_thinking");
 
-      expect(thinkingBlock).toBeTruthy();
-      expect(thinkingBlock?.signature).toBe(SKIP_THOUGHT_SIGNATURE);
+      expect(thinkingBlock).toBeUndefined();
       expect(JSON.stringify(content)).not.toContain(foreignSignature);
-      expect(result.needsSignedThinkingWarmup).toBe(false);
     });
 
     it("returns requestedModel matching URL model", () => {

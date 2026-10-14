@@ -48,33 +48,6 @@ interface HealthScoreState {
 }
 
 /**
- * Recompute a numeric account index after the account at `removedIndex` has been
- * spliced out and subsequent indices renumbered down by one (see
- * AccountManager.removeAccount). Returns null when the entry belonged to the
- * removed account and should therefore be dropped.
- */
-function remapAccountIndexAfterRemoval(index: number, removedIndex: number): number | null {
-  if (index === removedIndex) return null;
-  return index > removedIndex ? index - 1 : index;
-}
-
-/**
- * Rebuild a number-keyed Map in place after an account removal: drop the removed
- * index's entry and shift higher indices down by one, so entries keep referring
- * to the same accounts once the account list is renumbered.
- */
-function remapNumberKeyedMap<V>(map: Map<number, V>, removedIndex: number): void {
-  const entries = [...map.entries()];
-  map.clear();
-  for (const [index, value] of entries) {
-    const next = remapAccountIndexAfterRemoval(index, removedIndex);
-    if (next !== null) {
-      map.set(next, value);
-    }
-  }
-}
-
-/**
  * Tracks health scores for accounts.
  * Higher score = healthier account = preferred for selection.
  */
@@ -172,16 +145,6 @@ export class HealthScoreTracker {
    */
   reset(accountIndex: number): void {
     this.scores.delete(accountIndex);
-  }
-
-  /**
-   * Remap health-score state after the account at `removedIndex` is removed from
-   * the pool. AccountManager.removeAccount() splices the account out and
-   * renumbers every subsequent account's index down by one; without this remap
-   * the index-keyed scores silently attach to the wrong accounts.
-   */
-  remapAfterRemoval(removedIndex: number): void {
-    remapNumberKeyedMap(this.scores, removedIndex);
   }
 
   /**
@@ -396,14 +359,6 @@ export class TokenBucketTracker {
     return this.config.maxTokens;
   }
 
-  /**
-   * Remap token-bucket state after the account at `removedIndex` is removed from
-   * the pool. Mirrors the renumbering AccountManager.removeAccount() applies, so
-   * the index-keyed buckets stay attached to the correct accounts.
-   */
-  remapAfterRemoval(removedIndex: number): void {
-    remapNumberKeyedMap(this.buckets, removedIndex);
-  }
 }
 
 // ============================================================================
@@ -438,8 +393,8 @@ export function getHealthTracker(): HealthScoreTracker {
 }
 
 /**
- * Initialize the global health tracker with custom config.
- * Call this at plugin startup if custom config is needed.
+ * Replaces the global health tracker. Scores are keyed by account index, so
+ * this runs whenever an account pool is loaded (see account-pool.ts).
  */
 export function initHealthTracker(config: Partial<HealthScoreConfig>): HealthScoreTracker {
   globalHealthTracker = new HealthScoreTracker(config);

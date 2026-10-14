@@ -1,5 +1,5 @@
 import { formatRefreshParts, parseRefreshParts } from "./auth";
-import { hashRefreshToken, loadAccounts, removeAccountFromStorage, saveAccounts, saveAccountsReplace, type AccountStorageV4, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
+import { hashRefreshToken, loadAccounts, saveAccounts, saveAccountsReplace, type AccountStorageV4, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
 import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
 import { getHealthTracker, getTokenTracker, selectHybridAccount, type AccountWithMetrics } from "./rotation";
@@ -184,10 +184,47 @@ export interface ManagedAccount {
   verificationRequiredAt?: number;
   verificationRequiredReason?: string;
   verificationUrl?: string;
+  /** See AccountMetadataV3.revokedAt. */
+  revokedAt?: number;
 }
 
 function nowMs(): number {
   return Date.now();
+}
+
+/** Builds the in-memory account for a stored pool entry (with a refresh token). */
+function toManagedAccount(acc: AccountMetadataV3, index: number, now: number): ManagedAccount {
+  const clearedQuotaKeys = sanitizeClearedQuotaKeys(acc.clearedQuotaKeys);
+  return {
+    index,
+    email: acc.email,
+    addedAt: clampNonNegativeInt(acc.addedAt, now),
+    lastUsed: clampNonNegativeInt(acc.lastUsed, 0),
+    parts: {
+      refreshToken: acc.refreshToken,
+      projectId: acc.projectId,
+      managedProjectId: acc.managedProjectId,
+    },
+    enabled: acc.enabled !== false,
+    rateLimitResetTimes: acc.rateLimitResetTimes ?? {},
+    rateLimitSetTimes: sanitizeRateLimitSetTimes(acc.rateLimitSetTimes, acc.rateLimitResetTimes),
+    clearedQuotaKeys: clearedQuotaKeys,
+    clearedSetTimes: sanitizeClearedSetTimes(acc.clearedSetTimes, clearedQuotaKeys),
+    lastSwitchReason: acc.lastSwitchReason,
+    coolingDownUntil: acc.coolingDownUntil,
+    cooldownReason: acc.cooldownReason,
+    touchedForQuota: {},
+    fingerprint: acc.fingerprint ?? generateFingerprint(),
+    fingerprintHistory: acc.fingerprintHistory ?? [],
+    cachedQuota: acc.cachedQuota as Partial<Record<QuotaGroup, QuotaGroupSummary>> | undefined,
+    cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
+    statusChangedAt: acc.statusChangedAt,
+    verificationRequired: acc.verificationRequired,
+    verificationRequiredAt: acc.verificationRequiredAt,
+    verificationRequiredReason: acc.verificationRequiredReason,
+    verificationUrl: acc.verificationUrl,
+    revokedAt: acc.revokedAt,
+  };
 }
 
 function clampNonNegativeInt(value: unknown, fallback: number): number {
@@ -464,52 +501,21 @@ export class AccountManager {
     if (stored && stored.accounts.length > 0) {
       const baseNow = nowMs();
       this.accounts = stored.accounts
-        .map((acc, index): ManagedAccount | null => {
-          if (!acc.refreshToken || typeof acc.refreshToken !== "string") {
-            return null;
-          }
+        .filter((acc) => !!acc.refreshToken && typeof acc.refreshToken === "string")
+        .map((acc, index): ManagedAccount => {
           const matchesFallback = !!(
             authFallback &&
             authParts &&
             authParts.refreshToken &&
             acc.refreshToken === authParts.refreshToken
           );
-
-          const clearedQuotaKeys = sanitizeClearedQuotaKeys(acc.clearedQuotaKeys);
-
-          return {
-            index,
-            email: acc.email,
-            addedAt: clampNonNegativeInt(acc.addedAt, baseNow),
-            lastUsed: clampNonNegativeInt(acc.lastUsed, 0),
-            parts: {
-              refreshToken: acc.refreshToken,
-              projectId: acc.projectId,
-              managedProjectId: acc.managedProjectId,
-            },
-            access: matchesFallback ? authFallback?.access : undefined,
-            expires: matchesFallback ? authFallback?.expires : undefined,
-            enabled: acc.enabled !== false,
-            rateLimitResetTimes: acc.rateLimitResetTimes ?? {},
-            rateLimitSetTimes: sanitizeRateLimitSetTimes(acc.rateLimitSetTimes, acc.rateLimitResetTimes),
-            clearedQuotaKeys: clearedQuotaKeys,
-            clearedSetTimes: sanitizeClearedSetTimes(acc.clearedSetTimes, clearedQuotaKeys),
-            lastSwitchReason: acc.lastSwitchReason,
-            coolingDownUntil: acc.coolingDownUntil,
-            cooldownReason: acc.cooldownReason,
-            touchedForQuota: {},
-            fingerprint: acc.fingerprint ?? generateFingerprint(),
-            fingerprintHistory: acc.fingerprintHistory ?? [],
-            cachedQuota: acc.cachedQuota as Partial<Record<QuotaGroup, QuotaGroupSummary>> | undefined,
-            cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
-            statusChangedAt: acc.statusChangedAt,
-            verificationRequired: acc.verificationRequired,
-            verificationRequiredAt: acc.verificationRequiredAt,
-            verificationRequiredReason: acc.verificationRequiredReason,
-            verificationUrl: acc.verificationUrl,
-          };
-        })
-        .filter((a): a is ManagedAccount => a !== null);
+          const managed = toManagedAccount(acc, index, baseNow);
+          if (matchesFallback) {
+            managed.access = authFallback?.access;
+            managed.expires = authFallback?.expires;
+          }
+          return managed;
+        });
 
       // Update fingerprint versions to match the current runtime version.
       // Saved fingerprints may carry an older version string; this ensures
@@ -1018,50 +1024,27 @@ export class AccountManager {
     return true;
   }
 
-  removeAccountByIndex(accountIndex: number): boolean {
-    if (accountIndex < 0 || accountIndex >= this.accounts.length) {
-      return false;
+  /**
+   * Google rejected the account's refresh token (`invalid_grant`). The account
+   * is disabled but kept, with its email, project and fingerprint, so it can be
+   * signed in again ("Refresh token" in the account manager, or re-authenticate
+   * through OpenCode). Saved right away.
+   */
+  markAccountRevoked(account: ManagedAccount): void {
+    if (!this.accounts.includes(account)) {
+      return;
     }
-    const account = this.accounts[accountIndex];
-    if (!account) {
-      return false;
-    }
-    return this.removeAccount(account);
+    account.revokedAt = nowMs();
+    account.statusChangedAt = account.revokedAt;
+    account.access = undefined;
+    account.expires = undefined;
+    this.applyEnabled(account.index, false);
+    this.requestSaveToDisk(0);
   }
 
-  removeAccount(account: ManagedAccount): boolean {
-    const idx = this.accounts.indexOf(account);
-    if (idx < 0) {
-      return false;
-    }
-
-    this.accounts.splice(idx, 1);
-    this.accounts.forEach((acc, index) => {
-      acc.index = index;
-    });
-
-    if (this.accounts.length === 0) {
-      this.cursor = 0;
-      this.currentAccountIndexByFamily.claude = -1;
-      this.currentAccountIndexByFamily.gemini = -1;
-      return true;
-    }
-
-    if (this.cursor > idx) {
-      this.cursor -= 1;
-    }
-    this.cursor = this.cursor % this.accounts.length;
-
-    for (const family of ["claude", "gemini"] as ModelFamily[]) {
-      if (this.currentAccountIndexByFamily[family] > idx) {
-        this.currentAccountIndexByFamily[family] -= 1;
-      }
-      if (this.currentAccountIndexByFamily[family] >= this.accounts.length) {
-        this.currentAccountIndexByFamily[family] = -1;
-      }
-    }
-
-    return true;
+  /** True when the pool has accounts and every one's refresh token was revoked. */
+  areAllAccountsRevoked(): boolean {
+    return this.accounts.length > 0 && this.accounts.every((account) => account.revokedAt !== undefined);
   }
 
   updateFromAuth(account: ManagedAccount, auth: OAuthAuthDetails): void {
@@ -1145,22 +1128,60 @@ export class AccountManager {
   }
 
   /**
+   * Re-reads the pool file and applies what other writers (the account manager
+   * CLI, another server) changed: see adoptStoredState. Accounts added on disk
+   * are appended. Runs in the storage queue, after any save in progress.
+   */
+  async syncFromDisk(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    await this.enqueueStorageOperation(async () => {
+      const stored = await loadAccounts();
+      if (this.disposed || !stored) {
+        return;
+      }
+      this.adoptStoredState(stored);
+      const known = new Set(this.accounts.map((account) => account.parts.refreshToken));
+      const now = nowMs();
+      for (const acc of stored.accounts) {
+        if (!acc.refreshToken || known.has(acc.refreshToken)) {
+          continue;
+        }
+        this.accounts.push(toManagedAccount(acc, this.accounts.length, now));
+        known.add(acc.refreshToken);
+        log.info(`Account ${acc.email ?? this.accounts.length} added to the pool`);
+      }
+      for (const family of Object.keys(this.currentAccountIndexByFamily) as ModelFamily[]) {
+        if (this.currentAccountIndexByFamily[family] < 0) {
+          this.currentAccountIndexByFamily[family] = this.accounts.find((a) => a.enabled !== false)?.index ?? -1;
+        }
+      }
+    });
+  }
+
+  /**
    * Applies what other writers (the account manager CLI, another server) saved
-   * to the pool: newer enable/disable and verification state, newer device
-   * fingerprints, and deletions. A deleted account is disabled rather than
-   * removed so account indices, and the index-keyed request state, stay
-   * stable until the pool is next loaded.
+   * to the pool: newer enable/disable, verification and revocation state, newer
+   * device fingerprints, and deletions. A deleted account, or one whose email
+   * now belongs to another entry (signed in again with a new token), is
+   * disabled rather than removed so account indices, and the index-keyed health
+   * scores, stay stable until the pool is next loaded.
    */
   private adoptStoredState(stored: AccountStorageV4 | undefined): void {
     if (!stored?.accounts) {
       return;
     }
     const byToken = new Map(stored.accounts.map((account) => [account.refreshToken, account]));
+    const storedEmails = new Set(stored.accounts.map((account) => account.email).filter(Boolean));
     const deleted = new Set(stored.deletedRefreshTokenHashes ?? []);
     for (const account of this.accounts) {
       const saved = byToken.get(account.parts.refreshToken);
       if (!saved) {
-        if (account.enabled && deleted.has(hashRefreshToken(account.parts.refreshToken))) {
+        const superseded =
+          deleted.has(hashRefreshToken(account.parts.refreshToken)) ||
+          (!!account.email && storedEmails.has(account.email));
+        if (account.enabled && superseded) {
           this.applyEnabled(account.index, false);
         }
         continue;
@@ -1171,6 +1192,7 @@ export class AccountManager {
         account.verificationRequiredAt = saved.verificationRequiredAt;
         account.verificationRequiredReason = saved.verificationRequiredReason;
         account.verificationUrl = saved.verificationUrl;
+        account.revokedAt = saved.revokedAt;
         this.applyEnabled(account.index, saved.enabled !== false);
       }
       if (saved.fingerprint && (saved.fingerprint.createdAt ?? -1) > (account.fingerprint?.createdAt ?? -1)) {
@@ -1279,6 +1301,7 @@ export class AccountManager {
         verificationRequiredAt: a.verificationRequiredAt,
         verificationRequiredReason: a.verificationRequiredReason,
         verificationUrl: a.verificationUrl,
+        revokedAt: a.revokedAt,
       })),
       activeIndex: claudeIndex,
       activeIndexByFamily: {
@@ -1286,25 +1309,6 @@ export class AccountManager {
         gemini: geminiIndex,
       },
     };
-  }
-
-  async persistAccountRemoval(refreshToken: string): Promise<void> {
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-      this.saveTimeout = null;
-    }
-    this.savePending = false;
-
-    const storage = this.createStorageSnapshot();
-
-    try {
-      await this.enqueueStorageOperation(async () => {
-        await saveAccounts(storage);
-        await removeAccountFromStorage(refreshToken);
-      });
-    } finally {
-      this.resolveSavePromises();
-    }
   }
 
   private enqueueStorageOperation(operation: () => Promise<void>): Promise<void> {

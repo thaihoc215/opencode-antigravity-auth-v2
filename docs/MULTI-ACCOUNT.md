@@ -96,6 +96,8 @@ Useful when:
 
 The account manager CLI (`bunx opencode-antigravity-auth`) adds several accounts in a row (**Add account**). Its plain-text menu, shown when the terminal is not interactive, also offers **(f)resh start**, which replaces the whole pool with the accounts you sign in next.
 
+A running OpenCode picks up what the account manager changes (added accounts, enable/disable, sign-ins, deletions) within a second; no restart is needed. All projects open in one OpenCode server share the same pool, so rate limits seen in one project apply to the others.
+
 ---
 
 ## Account Storage
@@ -143,14 +145,12 @@ Accounts are stored in `~/.config/opencode/antigravity-accounts.json`:
 
 ## Token Revocation
 
-If Google revokes a token (e.g., password change, security event), you'll see `invalid_grant` errors. The plugin automatically removes invalid accounts.
+If Google revokes a token (e.g., password change, security event, long inactivity), the refresh fails with `invalid_grant`. The plugin disables that account and keeps it in the pool, marked as signed out (`[signed out - refresh token]` in the account manager, "signed out by Google" in OpenCode's sign-in form). Sign it in again to enable it, with its project and settings intact:
 
-To manually reset:
+- account manager CLI: select the account, then **Refresh token**
+- OpenCode: `opencode auth login google --method antigravity`, then **Re-authenticate `<email>`**
 
-```bash
-rm ~/.config/opencode/antigravity-accounts.json
-opencode auth login google --method antigravity
-```
+Enabling a signed-out account without signing in again is refused, since its token no longer works. To drop it instead, delete it in the account manager.
 
 ---
 

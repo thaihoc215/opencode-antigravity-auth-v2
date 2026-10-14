@@ -52,6 +52,7 @@ src/
 │   └── ui/                  # Terminal menu widgets
 └── plugin/
     ├── router.ts            # Request routing: account selection, retries, endpoint fallback
+    ├── account-pool.ts      # One shared pool per pool file; watches the file
     ├── oauth-flow.ts        # Sign-in shared by the integration and the CLI; writes the pool
     ├── verification.ts      # Google account verification (403 detection, probe)
     ├── auth.ts              # Token validation & refresh
@@ -60,9 +61,7 @@ src/
     ├── thinking-recovery.ts # Turn boundary detection, crash recovery
     ├── recovery.ts          # Recoverable error classification
     ├── quota.ts             # Quota checking (API usage stats)
-    ├── cache.ts             # Signature caching
-    ├── cache/
-    │   └── signature-cache.ts # Disk-based signature persistence
+    ├── cache.ts             # Thinking signature cache (in memory; Gemini 3 replay)
     ├── config/
     │   ├── schema.ts        # Zod config schema
     │   └── loader.ts        # Config file loading
@@ -217,6 +216,10 @@ The server and the account manager CLI both write the file. Writes take a file l
 - Deleted accounts are kept as hashed tombstones (`deletedRefreshTokenHashes`), so a stale copy cannot bring them back. "Delete all" and "start fresh" tombstone every replaced account.
 - A file that cannot be read or parsed fails the write instead of being overwritten.
 
+Every project OpenCode opens in one server shares the pool (`account-pool.ts`): one `AccountManager` per pool file, so a 429 seen by one project steers the others away too, and one proactive token refresh runs. The pool watches the file; changes from the account manager CLI (added accounts, enable/disable, sign-ins, deletions) apply within a second, without a restart. Request state (backoff, failure counts) is kept per account object, never by list position.
+
+When Google rejects an account's refresh token (`invalid_grant`), the account is disabled and marked `revokedAt`, keeping its email, project and fingerprint; signing it in again ("Refresh token" in the CLI, or Re-authenticate in OpenCode) enables it.
+
 ---
 
 ## Configuration
@@ -236,7 +239,6 @@ Location: `~/.config/opencode/antigravity.json`
 
 ```json
 {
-  "keep_thinking": false,
   "debug": false
 }
 ```

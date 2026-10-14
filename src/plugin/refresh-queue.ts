@@ -18,7 +18,7 @@
 
 import type { AccountManager, ManagedAccount } from "./accounts";
 import type { OAuthAuthDetails } from "./types";
-import { refreshAccessToken } from "./token";
+import { AntigravityTokenRefreshError, refreshAccessToken } from "./token";
 import { createLogger } from "./logger";
 
 const log = createLogger("refresh-queue");
@@ -316,6 +316,15 @@ export class ProactiveRefreshQueue {
           }
         } catch (error) {
           this.state.errorCount++;
+          if (error instanceof AntigravityTokenRefreshError && error.code === "invalid_grant") {
+            // Revoked sign-in: disable the account until it is signed in again.
+            this.accountManager.markAccountRevoked(account);
+            log.warn("Google revoked an account's sign-in; it is disabled until signed in again", {
+              accountIndex: account.index,
+              email: account.email ?? "unknown",
+            });
+            continue;
+          }
           this.recordRefreshFailure(account, Date.now());
           // Log but don't throw - continue with other accounts
           log.warn("Failed to refresh account", {

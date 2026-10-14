@@ -45,7 +45,7 @@ export function getStatusBadge(status: AccountStatus | undefined): string {
   switch (status) {
     case 'active': return `${ANSI.green}[active]${ANSI.reset}`;
     case 'rate-limited': return `${ANSI.yellow}[rate-limited]${ANSI.reset}`;
-    case 'expired': return `${ANSI.red}[expired]${ANSI.reset}`;
+    case 'expired': return `${ANSI.red}[signed out - refresh token]${ANSI.reset}`;
     case 'verification-required': return `${ANSI.red}[needs verification]${ANSI.reset}`;
     default: return '';
   }

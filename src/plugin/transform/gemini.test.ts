@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   isGeminiModel,
   isGemini3Model,
@@ -6,8 +6,6 @@ buildGemini3ThinkingConfig,
   buildGemini25ThinkingConfig,
 normalizeGeminiTools,
   applyGeminiTransforms,
-  toGeminiSchema,
-  wrapToolsAsFunctionDeclarations,
 } from "./gemini";
 import type { RequestPayload } from "./types";
 

@@ -211,7 +211,9 @@ function menuAccounts(storage: AccountStorageV4): ExistingAccountInfo[] {
   const now = Date.now();
   return storage.accounts.map((acc, idx) => {
     let status: ExistingAccountInfo["status"] = "active";
-    if (acc.verificationRequired) {
+    if (acc.revokedAt !== undefined) {
+      status = "expired";
+    } else if (acc.verificationRequired) {
       status = "verification-required";
     } else {
       const rateLimited = Object.values(acc.rateLimitResetTimes ?? {}).some(
@@ -344,6 +346,11 @@ async function showQuotas(storage: AccountStorageV4): Promise<void> {
 async function toggleAccount(storage: AccountStorageV4, index: number): Promise<void> {
   const acc = storage.accounts[index];
   if (!acc) return;
+  if (acc.enabled === false && acc.revokedAt !== undefined) {
+    console.log(`\nGoogle revoked the sign-in of ${acc.email || `account ${index + 1}`}. Use "Refresh token" to sign it in again; that enables it.\n`);
+    await pressEnterToContinue();
+    return;
+  }
   acc.enabled = acc.enabled === false;
   acc.statusChangedAt = Date.now();
   await saveAccounts(storage);

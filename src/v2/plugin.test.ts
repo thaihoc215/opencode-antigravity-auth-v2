@@ -11,6 +11,11 @@ vi.mock("../plugin/storage", async (importOriginal) => {
   };
 });
 
+vi.mock("../plugin/account-pool", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../plugin/account-pool")>();
+  return { ...original, watchAccountPoolFile: vi.fn(() => () => {}) };
+});
+
 vi.mock("../plugin/version", () => ({
   initAntigravityVersion: vi.fn(async () => undefined),
 }));
@@ -19,6 +24,14 @@ const { default: plugin, cliCommand, OAUTH_METHOD_ID, PLUGIN_ID, sdkPackage, toV
   "./plugin"
 );
 const storageModule = await import("../plugin/storage");
+const accountPoolModule = await import("../plugin/account-pool");
+
+/** The pool-file listener the plugin registered (the account manager CLI saved). */
+function poolFileChanged(): void {
+  const listener = vi.mocked(accountPoolModule.watchAccountPoolFile).mock.calls.at(-1)?.[0];
+  if (!listener) throw new Error("no pool file listener");
+  listener();
+}
 
 type Callback = (input: any) => unknown;
 
@@ -564,6 +577,47 @@ describe("V2 credential changes", () => {
     await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(2));
     await (cleanup as () => Promise<void>)();
+  });
+
+  it("reloads only the sign-in form when the account manager edits a non-empty pool", async () => {
+    const stored = (enabled: boolean) => ({
+      version: 4 as const,
+      accounts: [{ email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 0, enabled }],
+      activeIndex: 0,
+    });
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(stored(true));
+    const fake = createFakeContext();
+    controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1));
+
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(stored(false));
+    poolFileChanged();
+
+    await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1);
+    await (cleanup as () => Promise<void>)();
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(null);
+  });
+
+  it("rebuilds when the account manager adds the first account", async () => {
+    const fake = createFakeContext();
+    controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1));
+
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [{ email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 0 }],
+      activeIndex: 0,
+    });
+    poolFileChanged();
+
+    await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(2));
+    await (cleanup as () => Promise<void>)();
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(null);
   });
 
   it("subscribes again when the event stream ends", async () => {

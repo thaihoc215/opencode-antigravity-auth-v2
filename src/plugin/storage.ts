@@ -223,6 +223,12 @@ export interface AccountMetadataV3 {
   verificationRequiredAt?: number;
   verificationRequiredReason?: string;
   verificationUrl?: string;
+  /**
+   * When Google rejected the refresh token (`invalid_grant`: revoked, password
+   * changed, expired). The account stays in the pool, disabled, until it is
+   * signed in again.
+   */
+  revokedAt?: number;
   /** Cached soft quota data */
   cachedQuota?: Record<string, { remainingFraction?: number; resetTime?: string; modelCount: number }>;
   cachedQuotaUpdatedAt?: number;
@@ -619,6 +625,7 @@ type AccountStatus = Pick<
   | "verificationRequiredAt"
   | "verificationRequiredReason"
   | "verificationUrl"
+  | "revokedAt"
 >;
 
 function accountStatus(account: AccountMetadataV3): AccountStatus {
@@ -629,11 +636,12 @@ function accountStatus(account: AccountMetadataV3): AccountStatus {
     verificationRequiredAt: account.verificationRequiredAt,
     verificationRequiredReason: account.verificationRequiredReason,
     verificationUrl: account.verificationUrl,
+    revokedAt: account.revokedAt,
   };
 }
 
 /**
- * Enable/disable and verification state, resolved as one group: the side that
+ * Enable/disable, verification and revocation state, resolved as one group: the side that
  * changed it last wins. A side without `statusChangedAt` (an older writer) only
  * wins when neither side has one.
  */

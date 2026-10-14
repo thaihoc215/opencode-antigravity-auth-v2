@@ -25,7 +25,6 @@ import {
   sanitizeUrlForLog,
 } from "./debug";
 import {
-  buildThinkingWarmupBody,
   isGenerativeLanguageRequest,
   prepareAntigravityRequest,
   transformAntigravityResponse,
@@ -38,10 +37,10 @@ import {
 import { EmptyResponseError } from "./errors";
 import { AntigravityTokenRefreshError, refreshAccessToken } from "./token";
 import { loadAccounts } from "./storage";
-import { AccountManager, type ModelFamily, parseRateLimitReason, calculateBackoffMs, computeSoftQuotaCacheTtlMs } from "./accounts";
+import { type AccountManager, type ManagedAccount, type ModelFamily, parseRateLimitReason, calculateBackoffMs, computeSoftQuotaCacheTtlMs } from "./accounts";
+import { acquireAccountPool } from "./account-pool";
 import type { AntigravityConfig } from "./config";
 import { checkAccountsQuota } from "./quota";
-import { createProactiveRefreshQueue, type ProactiveRefreshQueue } from "./refresh-queue";
 import { createLogger } from "./logger";
 import { getHealthTracker, getTokenTracker } from "./rotation";
 import { extractVerificationErrorDetails, isModelPermissionDeniedOnProjectError } from "./verification";
@@ -68,12 +67,25 @@ import type {
 /** How to add accounts, for error messages. */
 export const SIGN_IN_HINT = "`opencode auth login google --method antigravity`";
 
-const MAX_WARMUP_SESSIONS = 1000;
-const MAX_WARMUP_RETRIES = 2;
-// Per-session warmup attempt counter. A plain Set can't enforce
-// MAX_WARMUP_RETRIES (membership is only 0/1), so the retry cap was dead.
-const warmupAttemptCounts = new Map<string, number>();
-const warmupSucceededSessionIds = new Set<string>();
+/** The error for a request when the pool has accounts but none is enabled. */
+function noEnabledAccountError(accountManager: AccountManager): Error {
+  const accounts = accountManager.getAccounts();
+  if (accounts.length === 0) {
+    return new Error(`No Antigravity accounts available. Run ${SIGN_IN_HINT}.`);
+  }
+  const revoked = accounts.filter((account) => account.revokedAt !== undefined);
+  if (revoked.length === accounts.length) {
+    return new Error(
+      `Google revoked the sign-in of every Antigravity account. Sign them in again with ${SIGN_IN_HINT} (Re-authenticate).`,
+    );
+  }
+  const revokedNote = revoked.length > 0
+    ? ` ${revoked.map((account) => account.email ?? `Account ${account.index + 1}`).join(", ")} must be signed in again (${SIGN_IN_HINT}, Re-authenticate).`
+    : "";
+  return new Error(
+    `No enabled Antigravity account.${revokedNote} Enable accounts in the account manager (bunx opencode-antigravity-auth).`,
+  );
+}
 
 const log = createLogger("router");
 
@@ -187,43 +199,6 @@ async function triggerAsyncQuotaRefreshForAccount(
     log.debug(`quota-refresh-failed email=${accountKey}`, { error: String(err) });
   } finally {
     quotaRefreshInProgressByEmail.delete(accountKey);
-  }
-}
-
-function trackWarmupAttempt(sessionId: string): boolean {
-  if (warmupSucceededSessionIds.has(sessionId)) {
-    return false;
-  }
-  const attempts = getWarmupAttemptCount(sessionId);
-  if (attempts >= MAX_WARMUP_RETRIES) {
-    return false;
-  }
-  // Evict the oldest entry ONLY when inserting a brand-new session. Evicting
-  // before the has-check could delete the very session being retried (if it were
-  // the oldest), resetting its count to 0 and defeating the cap.
-  if (!warmupAttemptCounts.has(sessionId) && warmupAttemptCounts.size >= MAX_WARMUP_SESSIONS) {
-    const first = warmupAttemptCounts.keys().next().value;
-    if (first !== undefined) {
-      warmupAttemptCounts.delete(first);
-      warmupSucceededSessionIds.delete(first);
-    }
-  }
-  // Count this attempt up-front so failed attempts accrue toward the cap
-  // (previously the failure path cleared the record, so the cap never engaged).
-  warmupAttemptCounts.set(sessionId, attempts + 1);
-  return true;
-}
-
-function getWarmupAttemptCount(sessionId: string): number {
-  return warmupAttemptCounts.get(sessionId) ?? 0;
-}
-
-function markWarmupSuccess(sessionId: string): void {
-  warmupSucceededSessionIds.add(sessionId);
-  warmupAttemptCounts.delete(sessionId);
-  if (warmupSucceededSessionIds.size >= MAX_WARMUP_SESSIONS) {
-    const first = warmupSucceededSessionIds.values().next().value;
-    if (first) warmupSucceededSessionIds.delete(first);
   }
 }
 
@@ -414,6 +389,30 @@ async function extractRetryInfoFromBody(response: Response): Promise<RateLimitBo
   }
 }
 
+/**
+ * When each enabled account frees up for this model, e.g.
+ * "a@example.com 2m 10s, b@example.com 1h 5m".
+ */
+function describeAccountWaits(accountManager: AccountManager, family: ModelFamily, model: string | null): string {
+  const now = Date.now();
+  const keys = family === "claude"
+    ? ["claude"]
+    : ["gemini-antigravity", "gemini-cli"].flatMap((base) => (model ? [`${base}:${model}`, base] : [base]));
+  return accountManager
+    .getEnabledAccounts()
+    .map((account) => {
+      const resetTimes = account.rateLimitResetTimes as Record<string, number | undefined>;
+      const resets = keys
+        .map((key) => resetTimes[key])
+        .filter((time): time is number => typeof time === "number" && time > now);
+      const limitedUntil = resets.length > 0 ? Math.min(...resets) : 0;
+      const until = Math.max(limitedUntil, account.coolingDownUntil ?? 0);
+      const label = account.email ?? `account ${account.index + 1}`;
+      return until > now ? `${label} ${formatWaitTime(until - now)}` : label;
+    })
+    .join(", ");
+}
+
 function formatWaitTime(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const seconds = Math.ceil(ms / 1000);
@@ -469,27 +468,37 @@ interface RateLimitState {
   quotaKey: string; // Track which quota this state is for
 }
 
-// Key format: `${accountIndex}:${quotaKey}` for per-account-per-quota tracking
-const rateLimitStateByAccountQuota = new Map<string, RateLimitState>();
+// Per account, per quota key. Keyed by the account object, which every route in
+// the process shares (see account-pool.ts), so positions in the list never matter.
+let rateLimitStateByAccountQuota = new WeakMap<ManagedAccount, Map<string, RateLimitState>>();
+
+function rateLimitStates(account: ManagedAccount): Map<string, RateLimitState> {
+  let states = rateLimitStateByAccountQuota.get(account);
+  if (!states) {
+    states = new Map();
+    rateLimitStateByAccountQuota.set(account, states);
+  }
+  return states;
+}
 
 /**
  * Get rate limit backoff with time-window deduplication.
  * 
- * @param accountIndex - The account index
+ * @param account - The account
  * @param quotaKey - The quota key (e.g., "gemini-cli", "gemini-antigravity", "claude")
  * @param serverRetryAfterMs - Server-provided retry delay (if any)
  * @param maxBackoffMs - Maximum backoff delay in milliseconds (default 60000)
  * @returns { attempt, delayMs, isDuplicate } - isDuplicate=true if within dedup window
  */
 function getRateLimitBackoff(
-  accountIndex: number, 
+  account: ManagedAccount,
   quotaKey: string,
   serverRetryAfterMs: number | null,
   maxBackoffMs: number = 60_000
 ): { attempt: number; delayMs: number; isDuplicate: boolean } {
   const now = Date.now();
-  const stateKey = `${accountIndex}:${quotaKey}`;
-  const previous = rateLimitStateByAccountQuota.get(stateKey);
+  const states = rateLimitStates(account);
+  const previous = states.get(quotaKey);
   
   // Check if this is a duplicate 429 within the dedup window
   if (previous && (now - previous.lastAt < RATE_LIMIT_DEDUP_WINDOW_MS)) {
@@ -508,10 +517,10 @@ function getRateLimitBackoff(
     ? previous.consecutive429 + 1 
     : 1;
   
-  rateLimitStateByAccountQuota.set(stateKey, { 
-    consecutive429: attempt, 
+  states.set(quotaKey, {
+    consecutive429: attempt,
     lastAt: now,
-    quotaKey 
+    quotaKey,
   });
   
   const baseDelay = serverRetryAfterMs ?? 1000;
@@ -523,9 +532,8 @@ function getRateLimitBackoff(
  * Reset rate limit state for an account+quota combination.
  * Only resets the specific quota, not all quotas for the account.
  */
-function resetRateLimitState(accountIndex: number, quotaKey: string): void {
-  const stateKey = `${accountIndex}:${quotaKey}`;
-  rateLimitStateByAccountQuota.delete(stateKey);
+function resetRateLimitState(account: ManagedAccount, quotaKey: string): void {
+  rateLimitStateByAccountQuota.get(account)?.delete(quotaKey);
 }
 
 function headerStyleToQuotaKey(headerStyle: HeaderStyle, family: ModelFamily): string {
@@ -562,21 +570,21 @@ function hasUsableEndpointAfterIndex(index: number, headerStyle: HeaderStyle): b
 }
 
 // Track consecutive non-429 failures per account to prevent infinite loops
-const accountFailureState = new Map<number, { consecutiveFailures: number; lastFailureAt: number }>();
+let accountFailureState = new WeakMap<ManagedAccount, { consecutiveFailures: number; lastFailureAt: number }>();
 const MAX_CONSECUTIVE_FAILURES = 5;
 const FAILURE_COOLDOWN_MS = 30_000; // 30 seconds cooldown after max failures
 const FAILURE_STATE_RESET_MS = 120_000; // Reset failure count after 2 minutes of no failures
 
-function trackAccountFailure(accountIndex: number): { failures: number; shouldCooldown: boolean; cooldownMs: number } {
+function trackAccountFailure(account: ManagedAccount): { failures: number; shouldCooldown: boolean; cooldownMs: number } {
   const now = Date.now();
-  const previous = accountFailureState.get(accountIndex);
+  const previous = accountFailureState.get(account);
   
   // Reset if last failure was more than 2 minutes ago
   const failures = previous && (now - previous.lastFailureAt < FAILURE_STATE_RESET_MS) 
     ? previous.consecutiveFailures + 1 
     : 1;
   
-  accountFailureState.set(accountIndex, { consecutiveFailures: failures, lastFailureAt: now });
+  accountFailureState.set(account, { consecutiveFailures: failures, lastFailureAt: now });
   
   const shouldCooldown = failures >= MAX_CONSECUTIVE_FAILURES;
   const cooldownMs = shouldCooldown ? FAILURE_COOLDOWN_MS : 0;
@@ -584,112 +592,35 @@ function trackAccountFailure(accountIndex: number): { failures: number; shouldCo
   return { failures, shouldCooldown, cooldownMs };
 }
 
-function resetAccountFailureState(accountIndex: number): void {
-  accountFailureState.delete(accountIndex);
-}
-
-/**
- * Compute the new numeric index for a per-account state key after the account
- * at `removedIndex` has been spliced out and subsequent indices renumbered
- * down by one (see AccountManager.removeAccount). Returns null when the entry
- * belonged to the removed account and should be dropped.
- */
-function remapIndexAfterRemoval(index: number, removedIndex: number): number | null {
-  if (index === removedIndex) return null
-  return index > removedIndex ? index - 1 : index
-}
-
-/**
- * Remap a Set of numeric account indices in place after an account removal.
- * Drops the removed index and shifts higher indices down by one so the set
- * keeps referring to the same accounts after renumbering.
- */
-function remapIndexSetAfterRemoval(set: Set<number>, removedIndex: number): void {
-  const values = [...set]
-  set.clear()
-  for (const index of values) {
-    const next = remapIndexAfterRemoval(index, removedIndex)
-    if (next !== null) set.add(next)
-  }
-}
-
-/**
- * Remap all module-level per-account state after the account at `removedIndex`
- * is removed from the pool. AccountManager.removeAccount() splices the account
- * out and renumbers every subsequent account's index down by one; index-keyed
- * state here must follow suit or it silently attaches to the wrong account.
- * Also folds in the old resetAllRateLimitStateForAccount cleanup (the removed
- * account's rate-limit entries are dropped).
- */
-function remapAccountStateAfterRemoval(removedIndex: number): void {
-  // accountFailureState: Map<accountIndex, ...>
-  const failureEntries = [...accountFailureState.entries()]
-  accountFailureState.clear()
-  for (const [index, state] of failureEntries) {
-    const next = remapIndexAfterRemoval(index, removedIndex)
-    if (next !== null) accountFailureState.set(next, state)
-  }
-
-  // rateLimitStateByAccountQuota: Map<`${accountIndex}:${quotaKey}`, ...>
-  const rateEntries = [...rateLimitStateByAccountQuota.entries()]
-  rateLimitStateByAccountQuota.clear()
-  for (const [key, state] of rateEntries) {
-    const sep = key.indexOf(":")
-    const index = Number(key.slice(0, sep))
-    const quotaKey = key.slice(sep + 1)
-    if (sep < 0 || Number.isNaN(index)) {
-      // Malformed key — preserve as-is rather than dropping silently.
-      rateLimitStateByAccountQuota.set(key, state)
-      continue
-    }
-    const next = remapIndexAfterRemoval(index, removedIndex)
-    if (next !== null) rateLimitStateByAccountQuota.set(`${next}:${quotaKey}`, state)
-  }
-
-  // Trackers in rotation.ts are index-keyed too; keep them attached to the right accounts.
-  getHealthTracker().remapAfterRemoval(removedIndex)
-  getTokenTracker().remapAfterRemoval(removedIndex)
+function resetAccountFailureState(account: ManagedAccount): void {
+  accountFailureState.delete(account);
 }
 
 /**
  * Test-only hooks. NOT part of the plugin's runtime surface — exported so unit
- * tests can exercise the pure loop-escape / index-remap / warmup helpers and
- * inspect the index-keyed module state they mutate. Kept in one object to avoid
+ * tests can exercise the pure loop-escape helpers and inspect the per-account
+ * module state they mutate.Kept in one object to avoid
  * scattering `export` across internal helpers.
  */
 export const loopEscapeTestHooks = {
   hasUsableEndpointAfterIndex,
   isEndpointUsableForHeaderStyle,
   resolveQuotaFallbackHeaderStyle,
-  remapIndexAfterRemoval,
-  remapIndexSetAfterRemoval,
-  remapAccountStateAfterRemoval,
-  trackWarmupAttempt,
-  getWarmupAttemptCount,
-  markWarmupSuccess,
-  MAX_WARMUP_SESSIONS,
-  seedAccountFailure(index: number, consecutiveFailures: number): void {
-    accountFailureState.set(index, { consecutiveFailures, lastFailureAt: Date.now() })
+  trackAccountFailure,
+  getRateLimitBackoff,
+  seedAccountFailure(account: ManagedAccount, consecutiveFailures: number): void {
+    accountFailureState.set(account, { consecutiveFailures, lastFailureAt: Date.now() })
   },
-  getAccountFailureCount(index: number): number | undefined {
-    return accountFailureState.get(index)?.consecutiveFailures
+  getAccountFailureCount(account: ManagedAccount): number | undefined {
+    return accountFailureState.get(account)?.consecutiveFailures
   },
-  seedRateLimitState(index: number, quotaKey: string, consecutive429: number): void {
-    rateLimitStateByAccountQuota.set(`${index}:${quotaKey}`, {
-      consecutive429,
-      lastAt: Date.now(),
-      quotaKey,
-    })
-  },
-  getRateLimitConsecutive(index: number, quotaKey: string): number | undefined {
-    return rateLimitStateByAccountQuota.get(`${index}:${quotaKey}`)?.consecutive429
+  getRateLimitConsecutive(account: ManagedAccount, quotaKey: string): number | undefined {
+    return rateLimitStateByAccountQuota.get(account)?.get(quotaKey)?.consecutive429
   },
   resetAllInternalState(): void {
-    accountFailureState.clear()
-    rateLimitStateByAccountQuota.clear()
-    warmupAttemptCounts.clear()
-    warmupSucceededSessionIds.clear()
-  },
+    accountFailureState = new WeakMap()
+    rateLimitStateByAccountQuota = new WeakMap()
+},
 }
 
 /**
@@ -807,24 +738,11 @@ export async function createAntigravityRoute({
 
     // The pool on disk is the source of truth for requests: `auth` only seeds it
     // when no antigravity-accounts.json exists yet, and lends its access token
-    // to the pool account with the same refresh token.
-    const accountManager = await AccountManager.loadFromDisk(auth);
+    // to the pool account with the same refresh token. Every route in this
+    // process shares the pool (one per pool file).
+    const lease = await acquireAccountPool(auth, config);
+    const accountManager = lease.manager;
     onPool?.(accountManager);
-    if (accountManager.getAccountCount() > 0) {
-      accountManager.requestSaveToDisk();
-    }
-
-    // Initialize proactive token refresh queue (ported from LLM-API-Key-Proxy)
-    let refreshQueue: ProactiveRefreshQueue | null = null;
-    if (config.proactive_token_refresh && accountManager.getAccountCount() > 0) {
-      refreshQueue = createProactiveRefreshQueue({
-        enabled: config.proactive_token_refresh,
-        bufferSeconds: config.proactive_refresh_buffer_seconds,
-        checkIntervalSeconds: config.proactive_refresh_check_interval_seconds,
-      });
-      refreshQueue.setAccountManager(accountManager);
-      refreshQueue.start();
-    }
 
     if (isDebugEnabled()) {
       const logPath = getLogFilePath();
@@ -835,8 +753,7 @@ export async function createAntigravityRoute({
 
     return {
       async dispose() {
-        refreshQueue?.stop();
-        await accountManager.dispose();
+        await lease.release();
       },
       async fetch(input, init) {
         if (!isGenerativeLanguageRequest(input)) {
@@ -844,7 +761,7 @@ export async function createAntigravityRoute({
         }
 
         // Fall back to the API-key-only sub-branch only when we have no
-        // usable OAuth accounts (e.g. all were removed via invalid_grant).
+        // usable OAuth accounts (e.g. all were disabled, or revoked by Google).
         // Otherwise the OAuth/AccountManager flow below handles routing,
         // including the Antigravity SDK / Gemini API-key fallback when
         // quota is exhausted (see tryAgySdkFallbackForRequest).
@@ -870,9 +787,11 @@ export async function createAntigravityRoute({
             );
             if (response) return response;
           }
+          if (accountManager.getTotalAccountCount() > 0) {
+            throw noEnabledAccountError(accountManager);
+          }
           return fetch(input, init);
         }
-
 
         const urlString = toUrlString(input);
         const family = getModelFamilyFromUrl(urlString);
@@ -983,7 +902,7 @@ export async function createAntigravityRoute({
           if (accountCount === 0) {
             const response = await tryAgySdkFallbackForRequest(input, init, config, agySdkCredentials, urlString);
             if (response) return response;
-            throw new Error(`No Antigravity accounts available. Run ${SIGN_IN_HINT}.`);
+            throw noEnabledAccountError(accountManager);
           }
 
           const softQuotaCacheTtlMs = computeSoftQuotaCacheTtlMs(
@@ -1074,7 +993,7 @@ export async function createAntigravityRoute({
                 model,
                 preferredHeaderStyle,
               );
-              const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000;
+              const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 30) * 1000;
               const response = await tryAgySdkFallbackForRequest(input, init, config, agySdkCredentials, urlString);
               if (response) return response;
               
@@ -1124,7 +1043,7 @@ export async function createAntigravityRoute({
 
             // If wait time exceeds max threshold, return error immediately instead of hanging
             // 0 means disabled (wait indefinitely)
-            const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000;
+            const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 30) * 1000;
             const response = await tryAgySdkFallbackForRequest(input, init, config, agySdkCredentials, urlString);
             if (response) return response;
             if (maxWaitMs > 0 && waitMs > maxWaitMs) {
@@ -1134,11 +1053,12 @@ export async function createAntigravityRoute({
                 "error"
               );
               
-              // Return a proper rate limit error response
               throw new Error(
-                `All ${accountCount} account(s) rate-limited for ${family}. ` +
-                `Quota resets in ${waitTimeFormatted}. ` +
-                `Add more accounts with ${SIGN_IN_HINT} or wait and retry.`
+                `All ${accountCount} account(s) rate-limited for ${model ?? family} ` +
+                `(${describeAccountWaits(accountManager, family, model)}). ` +
+                `The first one frees up in ${waitTimeFormatted}. ` +
+                `Add more accounts with ${SIGN_IN_HINT}, retry later, or raise max_rate_limit_wait_seconds ` +
+                `(now ${config.max_rate_limit_wait_seconds}s) to wait instead.`
               );
             }
 
@@ -1169,7 +1089,7 @@ pushDebug(
             try {
               const refreshed = await refreshAccessToken(authRecord);
               if (!refreshed) {
-                const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account.index);
+                const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account);
                 getHealthTracker().recordFailure(account.index);
                 lastError = new Error("Antigravity token refresh failed");
                 if (shouldCooldown) {
@@ -1179,7 +1099,7 @@ pushDebug(
                 }
                 continue;
               }
-              resetAccountFailureState(account.index);
+              resetAccountFailureState(account);
               accountManager.updateFromAuth(account, refreshed);
               authRecord = refreshed;
               try {
@@ -1189,26 +1109,19 @@ pushDebug(
               }
             } catch (error) {
               if (error instanceof AntigravityTokenRefreshError && error.code === "invalid_grant") {
-                // Capture the index BEFORE removal — removeAccount renumbers all
-                // subsequent accounts, so index-keyed state must be remapped to match.
-                const removedIndex = account.index;
-                const removed = accountManager.removeAccount(account);
-                if (removed) {
-                  remapAccountStateAfterRemoval(removedIndex);
-                  remapIndexSetAfterRemoval(triedSwitchIndices, removedIndex);
-                  log.warn(`Removed revoked account from pool - sign it in again with ${SIGN_IN_HINT}`);
-                  try {
-                    await accountManager.persistAccountRemoval(account.parts.refreshToken);
-                  } catch (persistError) {
-                    log.error("Failed to persist revoked account removal", { error: String(persistError) });
-                  }
-                }
+                // Google revoked the sign-in. Disable the account but keep it,
+                // so it can be signed in again without losing its settings.
+                accountManager.markAccountRevoked(account);
+                log.warn(
+                  `Google revoked the sign-in of ${account.email ?? `account ${account.index + 1}`}; it is disabled until it is signed in again with ${SIGN_IN_HINT}`,
+                );
 
                 if (accountManager.getAccountCount() === 0) {
-                  // Only report revoked credentials when OpenCode was actually in
-                  // OAuth mode at loader time. If we promoted OAuth from disk
-                  // over an API-key auth, OpenCode's API-key connection is fine.
-                  if (initialAuthWasOAuth && onAccountsRevoked) {
+                  // Only report revoked credentials when every account was revoked
+                  // and OpenCode was actually in OAuth mode at loader time. If we
+                  // promoted OAuth from disk over an API-key auth, OpenCode's
+                  // API-key connection is fine.
+                  if (initialAuthWasOAuth && onAccountsRevoked && accountManager.areAllAccountsRevoked()) {
                     try {
                       await onAccountsRevoked();
                     } catch (reportError) {
@@ -1232,16 +1145,14 @@ pushDebug(
                   );
                   if (fallback) return fallback;
 
-                  throw new Error(
-                    `All Antigravity accounts have invalid refresh tokens. Sign in again with ${SIGN_IN_HINT}.`,
-                  );
+                  throw noEnabledAccountError(accountManager);
                 }
 
                 lastError = error;
                 continue;
               }
 
-              const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account.index);
+              const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account);
               getHealthTracker().recordFailure(account.index);
               lastError = error instanceof Error ? error : new Error(String(error));
               if (shouldCooldown) {
@@ -1265,9 +1176,9 @@ pushDebug(
           let projectContext: ProjectContextResult;
           try {
             projectContext = await ensureProjectContext(authRecord);
-            resetAccountFailureState(account.index);
+            resetAccountFailureState(account);
           } catch (error) {
-            const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account.index);
+            const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account);
             getHealthTracker().recordFailure(account.index);
             lastError = error instanceof Error ? error : new Error(String(error));
             if (shouldCooldown) {
@@ -1288,73 +1199,6 @@ pushDebug(
               log.error("Failed to persist project context", { error: String(error) });
             }
           }
-
-          const runThinkingWarmup = async (
-            prepared: Awaited<ReturnType<typeof prepareAntigravityRequest>>,
-            projectId: string,
-          ): Promise<void> => {
-            if (!prepared.needsSignedThinkingWarmup || !prepared.sessionId) {
-              return;
-            }
-
-            if (!trackWarmupAttempt(prepared.sessionId)) {
-              return;
-            }
-
-            const warmupBody = buildThinkingWarmupBody(
-              typeof prepared.init.body === "string" ? prepared.init.body : undefined,
-              Boolean(prepared.effectiveModel?.toLowerCase().includes("claude") && prepared.effectiveModel?.toLowerCase().includes("thinking")),
-            );
-            if (!warmupBody) {
-              return;
-            }
-
-            const warmupUrl = toWarmupStreamUrl(prepared.request);
-            const warmupHeaders = new Headers(prepared.init.headers ?? {});
-            warmupHeaders.set("accept", "text/event-stream");
-
-            const warmupInit: RequestInit = {
-              ...prepared.init,
-              method: prepared.init.method ?? "POST",
-              headers: warmupHeaders,
-              body: warmupBody,
-            };
-
-            const warmupDebugContext = startAntigravityDebugRequest({
-              originalUrl: warmupUrl,
-              resolvedUrl: warmupUrl,
-              method: warmupInit.method,
-              headers: warmupHeaders,
-              body: warmupBody,
-              streaming: true,
-              projectId,
-            });
-
-            try {
-              pushDebug("thinking-warmup: start");
-              const warmupResponse = await fetch(warmupUrl, warmupInit);
-              const transformed = await transformAntigravityResponse(
-                warmupResponse,
-                true,
-                warmupDebugContext,
-                prepared.requestedModel,
-                projectId,
-                warmupUrl,
-                prepared.effectiveModel,
-                prepared.sessionId,
-              );
-              await transformed.text();
-              markWarmupSuccess(prepared.sessionId);
-              pushDebug("thinking-warmup: done");
-            } catch (error) {
-              // Do NOT clear the attempt on failure — failed warmups must count
-              // toward MAX_WARMUP_RETRIES so a session that always fails warmup
-              // stops retrying after the cap instead of priming every request.
-              pushDebug(
-                `thinking-warmup: failed ${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
-          };
 
           // Try endpoint fallbacks with single header style based on model suffix
           let shouldSwitchAccount = false;
@@ -1494,9 +1338,7 @@ pushDebug(
                 toolDebugPayload: prepared.toolDebugPayload,
               });
 
-              await runThinkingWarmup(prepared, projectContext.effectiveProjectId);
-
-              if (config.request_jitter_max_ms > 0) {
+if (config.request_jitter_max_ms > 0) {
                 const jitterMs = Math.floor(Math.random() * config.request_jitter_max_ms);
                 if (jitterMs > 0) {
                   await sleep(jitterMs, abortSignal);
@@ -1652,7 +1494,7 @@ pushDebug(
                 
                 // Only now do we call getRateLimitBackoff, which increments the global failure tracker
                 const quotaKey = headerStyleToQuotaKey(headerStyle, family);
-                const { attempt, delayMs } = getRateLimitBackoff(account.index, quotaKey, serverRetryMs);
+                const { attempt, delayMs } = getRateLimitBackoff(account, quotaKey, serverRetryMs);
                 
                 // Calculate potential backoffs
                 const smartBackoffMs = calculateBackoffMs(rateLimitReason, account.consecutiveFailures ?? 0, serverRetryMs);
@@ -1813,8 +1655,8 @@ pushDebug(
 
               // Success - reset rate limit backoff state for this quota
               const quotaKey = headerStyleToQuotaKey(headerStyle, family);
-              resetRateLimitState(account.index, quotaKey);
-              resetAccountFailureState(account.index);
+              resetRateLimitState(account, quotaKey);
+              resetAccountFailureState(account);
 
               let permissionDeniedOnProject = false;
               if (response.status === 403) {
@@ -2063,7 +1905,7 @@ pushDebug(
               }
 
               // All endpoints failed for this account - track failure and try next account
-              const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account.index);
+              const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account);
               lastError = error instanceof Error ? error : new Error(String(error));
               if (shouldCooldown) {
                 accountManager.markAccountCoolingDown(account, cooldownMs, "network-error");
@@ -2140,20 +1982,6 @@ function toUrlString(value: RequestInfo): string {
     return candidate;
   }
   return value.toString();
-}
-
-function toWarmupStreamUrl(value: RequestInfo): string {
-  const urlString = toUrlString(value);
-  try {
-    const url = new URL(urlString);
-    if (!url.pathname.includes(":streamGenerateContent")) {
-      url.pathname = url.pathname.replace(":generateContent", ":streamGenerateContent");
-    }
-    url.searchParams.set("alt", "sse");
-    return url.toString();
-  } catch {
-    return urlString;
-  }
 }
 
 function extractModelFromUrl(urlString: string): string | null {

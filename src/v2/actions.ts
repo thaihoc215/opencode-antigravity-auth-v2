@@ -17,6 +17,8 @@ export interface PoolAccountSummary {
   email?: string;
   enabled: boolean;
   verificationRequired: boolean;
+  /** Google revoked the sign-in (see AccountMetadataV3.revokedAt). */
+  revoked: boolean;
 }
 
 export type LoginAction = { type: "add" } | { type: "reauth"; index: number; email?: string };
@@ -26,6 +28,7 @@ interface StoredAccountLike {
   email?: string;
   enabled?: boolean;
   verificationRequired?: boolean;
+  revokedAt?: number;
 }
 
 export function summarizeAccounts(accounts: readonly StoredAccountLike[]): PoolAccountSummary[] {
@@ -34,6 +37,7 @@ export function summarizeAccounts(accounts: readonly StoredAccountLike[]): PoolA
     email: account.email,
     enabled: account.enabled !== false,
     verificationRequired: account.verificationRequired === true,
+    revoked: account.revokedAt !== undefined,
   }));
 }
 
@@ -57,7 +61,7 @@ export function buildActionField(accounts: readonly PoolAccountSummary[], cliCom
       label: `Re-authenticate ${accountLabel(account)}`,
       description: [
         `Account ${account.index + 1}`,
-        ...(account.enabled ? [] : ["disabled"]),
+        ...(account.revoked ? ["signed out by Google - sign in again"] : account.enabled ? [] : ["disabled"]),
         ...(account.verificationRequired ? ["verification required"] : []),
       ].join(" · "),
     })),

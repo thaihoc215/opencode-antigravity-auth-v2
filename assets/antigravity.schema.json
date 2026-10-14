@@ -18,50 +18,6 @@
       "type": "string",
       "description": "Custom directory for debug logs. Ignored in a project's .opencode/antigravity.json."
     },
-    "keep_thinking": {
-      "default": false,
-      "type": "boolean",
-      "description": "Preserve thinking blocks for Claude models using signature caching. May cause signature errors."
-    },
-    "signature_cache": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "default": true,
-          "type": "boolean",
-          "description": "Enable disk caching of thinking block signatures."
-        },
-        "memory_ttl_seconds": {
-          "default": 3600,
-          "type": "number",
-          "minimum": 60,
-          "maximum": 86400,
-          "description": "In-memory TTL in seconds."
-        },
-        "disk_ttl_seconds": {
-          "default": 172800,
-          "type": "number",
-          "minimum": 3600,
-          "maximum": 604800,
-          "description": "Disk TTL in seconds."
-        },
-        "write_interval_seconds": {
-          "default": 60,
-          "type": "number",
-          "minimum": 10,
-          "maximum": 600,
-          "description": "Background write interval in seconds."
-        }
-      },
-      "required": [
-        "enabled",
-        "memory_ttl_seconds",
-        "disk_ttl_seconds",
-        "write_interval_seconds"
-      ],
-      "additionalProperties": false,
-      "description": "Signature cache configuration for persisting thinking block signatures. Only used when keep_thinking is enabled."
-    },
     "empty_response_max_attempts": {
       "default": 4,
       "type": "number",
@@ -106,10 +62,11 @@
       "description": "Interval between proactive refresh checks in seconds."
     },
     "max_rate_limit_wait_seconds": {
-      "default": 300,
+      "default": 30,
       "type": "number",
       "minimum": 0,
-      "maximum": 3600
+      "maximum": 3600,
+      "description": "Longest wait, in seconds, for a rate-limited account before the request fails with an error naming the limited accounts. OpenCode shows nothing while the plugin waits. 0 waits indefinitely."
     },
     "cli_first": {
       "default": false,

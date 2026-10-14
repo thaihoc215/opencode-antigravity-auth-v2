@@ -67,23 +67,6 @@ export const ModelDiscoveryConfigSchema = z.object({
 export type ModelDiscoveryConfig = z.infer<typeof ModelDiscoveryConfigSchema>;
 
 /**
- * Signature cache configuration for persisting thinking block signatures to disk.
- */
-export const SignatureCacheConfigSchema = z.object({
-  /** Enable disk caching of signatures (default: true) */
-  enabled: z.boolean().default(true),
-  
-  /** In-memory TTL in seconds (default: 3600 = 1 hour) */
-  memory_ttl_seconds: z.number().min(60).max(86400).default(3600),
-  
-  /** Disk TTL in seconds (default: 172800 = 48 hours) */
-  disk_ttl_seconds: z.number().min(3600).max(604800).default(172800),
-  
-  /** Background write interval in seconds (default: 60) */
-  write_interval_seconds: z.number().min(10).max(600).default(60),
-});
-
-/**
  * Main configuration schema for the Antigravity OAuth plugin.
  */
 export const AntigravityConfigSchema = z.object({
@@ -115,30 +98,6 @@ export const AntigravityConfigSchema = z.object({
    * @default config dir + "/antigravity-logs"
    */
   log_dir: z.string().optional(),
-  
-  // =========================================================================
-  // Thinking Blocks
-  // =========================================================================
-  
-  /**
-   * Preserve thinking blocks for Claude models using signature caching.
-   * 
-   * When false (default): Thinking blocks are stripped for reliability.
-   * When true: Full context preserved, but may encounter signature errors.
-   * 
-   * @default false
-   */
-  keep_thinking: z.boolean().default(false),
-  
-  // =========================================================================
-  // Signature Caching
-  // =========================================================================
-  
-  /**
-   * Signature cache configuration for persisting thinking block signatures.
-   * Only used when keep_thinking is enabled.
-   */
-  signature_cache: SignatureCacheConfigSchema.optional(),
   
   // =========================================================================
   // Empty Response Retry (ported from LLM-API-Key-Proxy)
@@ -219,13 +178,15 @@ export const AntigravityConfigSchema = z.object({
   /**
    * Maximum time in seconds to wait when all accounts are rate-limited.
    * If the minimum wait time across all accounts exceeds this threshold,
-   * the plugin fails fast with an error instead of hanging.
-   * 
+   * the request fails right away with an error that says which accounts are
+   * limited and for how long. OpenCode shows nothing while the plugin waits
+   * (only the plugin log does), so long waits look like a hang.
+   *
    * Set to 0 to disable (wait indefinitely).
-   * 
-   * @default 300 (5 minutes)
+   *
+   * @default 30
    */
-  max_rate_limit_wait_seconds: z.number().min(0).max(3600).default(300),
+  max_rate_limit_wait_seconds: z.number().min(0).max(3600).default(30),
   
   /**
    * Prefer gemini-cli routing before Antigravity for Gemini models.
@@ -396,7 +357,6 @@ export const AntigravityConfigSchema = z.object({
 });
 
 export type AntigravityConfig = z.infer<typeof AntigravityConfigSchema>;
-export type SignatureCacheConfig = z.infer<typeof SignatureCacheConfigSchema>;
 
 /**
  * Default configuration values.
@@ -404,15 +364,14 @@ export type SignatureCacheConfig = z.infer<typeof SignatureCacheConfigSchema>;
 export const DEFAULT_CONFIG: AntigravityConfig = {
   debug: false,
   debug_tui: false,
-  keep_thinking: false,
-  empty_response_max_attempts: 4,
+empty_response_max_attempts: 4,
   empty_response_retry_delay_ms: 2000,
   claude_tool_hardening: true,
   claude_prompt_auto_caching: false,
   proactive_token_refresh: true,
   proactive_refresh_buffer_seconds: 1800,
   proactive_refresh_check_interval_seconds: 300,
-  max_rate_limit_wait_seconds: 300,
+  max_rate_limit_wait_seconds: 30,
   cli_first: false,
   agy_sdk: {
     enabled: true,
@@ -436,12 +395,6 @@ export const DEFAULT_CONFIG: AntigravityConfig = {
   soft_quota_threshold_percent: 90,
   quota_refresh_interval_minutes: 15,
   soft_quota_cache_ttl_minutes: "auto",
-  signature_cache: {
-    enabled: true,
-    memory_ttl_seconds: 3600,
-    disk_ttl_seconds: 172800,
-    write_interval_seconds: 60,
-  },
   health_score: {
     initial: 70,
     success_reward: 1,

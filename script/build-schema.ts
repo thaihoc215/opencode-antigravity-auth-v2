@@ -21,8 +21,6 @@ const optionDescriptions: Record<string, string> = {
     "Enable debug logging to file.",
   log_dir:
     "Custom directory for debug logs. Ignored in a project's .opencode/antigravity.json.",
-  keep_thinking:
-    "Preserve thinking blocks for Claude models using signature caching. May cause signature errors.",
   empty_response_max_attempts:
     "Maximum retry attempts when Antigravity returns an empty response (no candidates).",
   empty_response_retry_delay_ms:
@@ -37,6 +35,8 @@ const optionDescriptions: Record<string, string> = {
     "Seconds before token expiry to trigger proactive refresh.",
   proactive_refresh_check_interval_seconds:
     "Interval between proactive refresh checks in seconds.",
+  max_rate_limit_wait_seconds:
+    "Longest wait, in seconds, for a rate-limited account before the request fails with an error naming the limited accounts. OpenCode shows nothing while the plugin waits. 0 waits indefinitely.",
   cli_first:
     "Prefer gemini-cli routing before Antigravity for Gemini models. When false (default), Antigravity is tried first and gemini-cli is fallback.",
   scheduling_mode:
@@ -55,13 +55,6 @@ const optionDescriptions: Record<string, string> = {
     "TTL for cached soft quota data. 'auto' (default) calculates from refresh interval, or set a fixed number of minutes.",
 };
 
-const signatureCacheDescriptions: Record<string, string> = {
-  enabled: "Enable disk caching of thinking block signatures.",
-  memory_ttl_seconds: "In-memory TTL in seconds.",
-  disk_ttl_seconds: "Disk TTL in seconds.",
-  write_interval_seconds: "Background write interval in seconds.",
-};
-
 function addDescriptions(schema: Record<string, unknown>): void {
   const props = schema.properties as Record<string, Record<string, unknown>> | undefined;
   if (!props) return;
@@ -69,16 +62,6 @@ function addDescriptions(schema: Record<string, unknown>): void {
   for (const [key, prop] of Object.entries(props)) {
     if (optionDescriptions[key]) {
       prop.description = optionDescriptions[key];
-    }
-
-    if (key === "signature_cache" && prop.properties) {
-      const cacheProps = prop.properties as Record<string, Record<string, unknown>>;
-      for (const [cacheKey, cacheProp] of Object.entries(cacheProps)) {
-        if (signatureCacheDescriptions[cacheKey]) {
-          cacheProp.description = signatureCacheDescriptions[cacheKey];
-        }
-      }
-      prop.description = "Signature cache configuration for persisting thinking block signatures. Only used when keep_thinking is enabled.";
     }
   }
 }

@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 
 // ============================================================================
-// Thinking Signature Cache (for Claude multi-turn conversations)
+// Thinking signature cache (in memory). Gemini 3 needs the signature of its
+// previous thinking replayed on the next turn's function call; responses store
+// it here and requests restore it.
 // ============================================================================
-
-import { SignatureCache, createSignatureCache } from "./cache/signature-cache";
-import type { SignatureCacheConfig } from "./config";
 
 interface SignatureEntry {
   signature: string;
@@ -73,30 +72,6 @@ function evictStaleSessions(now: number): void {
 // 16 hex chars = 64-bit key space; keeps memory bounded while making collisions extremely unlikely.
 const SIGNATURE_TEXT_HASH_HEX_LEN = 16;
 
-// Disk cache instance (initialized via initDiskSignatureCache)
-let diskCache: SignatureCache | null = null;
-
-/**
- * Initialize the disk-based signature cache.
- * Call this from plugin initialization when keep_thinking is enabled.
- */
-export function initDiskSignatureCache(config: SignatureCacheConfig | undefined): SignatureCache | null {
-  diskCache?.shutdown();
-  diskCache = createSignatureCache(config);
-  return diskCache;
-}
-
-/** Flushes and stops the disk cache if it is still `instance` (another core may have replaced it). */
-export function shutdownDiskSignatureCache(instance: SignatureCache | null): void {
-  if (instance && diskCache === instance) {
-    diskCache.shutdown();
-    diskCache = null;
-  }
-}
-
-/**
- * Get the disk cache instance (for testing/debugging).
- */
 /**
  * Hashes text content into a stable, Unicode-safe key.
  *
@@ -107,16 +82,7 @@ function hashText(text: string): string {
 }
 
 /**
- * Create a disk cache key from sessionId and textHash.
- */
-function makeDiskKey(sessionId: string, textHash: string): string {
-  return `${sessionId}:${textHash}`;
-}
-
-/**
  * Caches a thinking signature for a given session and text.
- * Used for Claude models that require signed thinking blocks in multi-turn conversations.
- * Also writes to disk cache if enabled.
  */
 export function cacheSignature(sessionId: string, text: string, signature: string): void {
   if (!sessionId || !text || !signature) return;
@@ -158,17 +124,10 @@ export function cacheSignature(sessionId: string, text: string, signature: strin
 
   // Enforce the session cap now that a (possibly new) session was written.
   evictStaleSessions(now);
-
-  // Write to disk cache if enabled
-  if (diskCache) {
-    const diskKey = makeDiskKey(sessionId, textHash);
-    diskCache.store(diskKey, signature);
-  }
 }
 
 /**
  * Retrieves a cached signature for a given session and text.
- * Checks memory first, then falls back to disk cache.
  * Returns undefined if not found or expired.
  */
 export function getCachedSignature(sessionId: string, text: string): string | undefined {
@@ -195,41 +154,17 @@ export function getCachedSignature(sessionId: string, text: string): string | un
     }
   }
 
-  // Fall back to disk cache
-  if (diskCache) {
-    const diskKey = makeDiskKey(sessionId, textHash);
-    const diskValue = diskCache.retrieve(diskKey);
-    if (diskValue) {
-      // Promote to memory cache for faster subsequent access
-      let memCache = signatureCache.get(sessionId);
-      if (!memCache) {
-        memCache = new Map();
-        signatureCache.set(sessionId, memCache);
-      }
-      memCache.set(textHash, { signature: diskValue, timestamp: now });
-      touchSession(sessionId, now);
-      // A promote may have added a new session; keep the cap enforced.
-      evictStaleSessions(now);
-      return diskValue;
-    }
-  }
-
   return undefined;
 }
 
 /**
  * Clears signature cache for a specific session or all sessions.
- * Also clears from disk cache if enabled.
  */
 export function clearSignatureCache(sessionId?: string): void {
   if (sessionId) {
     dropSession(sessionId);
-    // Note: We don't clear individual sessions from disk cache to avoid
-    // expensive iteration. Disk cache entries will expire naturally.
   } else {
     signatureCache.clear();
     sessionLastTouched.clear();
-    // For full clear, we could clear disk cache, but leaving it for now
-    // since entries have TTL and will expire naturally.
   }
 }

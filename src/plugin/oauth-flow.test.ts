@@ -194,4 +194,29 @@ describe("persistAccountPool", () => {
     expect(storageModule.saveAccounts).toHaveBeenCalledTimes(1);
     expect(storageModule.replaceAccountPool).not.toHaveBeenCalled();
   });
+
+  it("enables an account Google signed out when it signs in again, and retires the old token", async () => {
+    vi.mocked(storageModule.loadAccounts).mockResolvedValueOnce({
+      version: 4,
+      accounts: [{
+        email: "new@example.com",
+        refreshToken: "old-token",
+        projectId: "project",
+        addedAt: 1,
+        lastUsed: 1,
+        enabled: false,
+        revokedAt: 10,
+        statusChangedAt: 10,
+      }],
+      activeIndex: 0,
+    });
+
+    await persistAccountPool([signIn]);
+
+    const written = vi.mocked(storageModule.saveAccounts).mock.calls[0]![0];
+    expect(written.accounts).toHaveLength(1);
+    expect(written.accounts[0]).toMatchObject({ refreshToken: "new-token", enabled: true, revokedAt: undefined, addedAt: 1 });
+    expect(written.accounts[0]!.statusChangedAt).toBeGreaterThan(10);
+    expect(written.deletedRefreshTokenHashes).toEqual([storageModule.hashRefreshToken("old-token")]);
+  });
 });

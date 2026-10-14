@@ -30,23 +30,9 @@ The plugin provides a `google_search` tool that the model can call to search the
 
 ## Model Behavior
 
-Settings that affect how the model thinks and responds.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `keep_thinking` | `false` | Preserve Claude's thinking blocks across turns. **Warning:** enabling may degrade model stability. |
+Claude's thinking blocks from earlier turns are always stripped from requests; Claude writes fresh thinking each turn. (The `keep_thinking` option and its disk signature cache were removed: the restored thinking broke Claude's turns. A config that still sets `keep_thinking` or `signature_cache` loads with a warning.)
 
 > **Note:** The `web_search` config options are deprecated. Google Search is now implemented as a dedicated `google_search` tool that the model can call explicitly.
-
-### About `keep_thinking`
-
-When `true`, Claude's thinking blocks are preserved in conversation history:
-- **Pros:** Model remembers its reasoning, more coherent across turns
-- **Cons:** May degrade model stability, slightly larger context
-
-When `false` (default), thinking is stripped:
-- **Pros:** More stable model behavior, smaller context
-- **Cons:** Model may be less coherent, forgets previous reasoning
 
 ---
 
@@ -156,12 +142,6 @@ These settings are already `true` by default — you don't need to set them:
 |---------|---------|--------------|
 | `switch_on_first_rate_limit` | `true` | Fast account switching |
 
-These settings are `false` by default:
-
-| Setting | Default | What it does |
-|---------|---------|--------------|
-| `keep_thinking` | `false` | Preserve Claude thinking (may degrade stability) |
-
 ---
 
 ## Advanced Settings
@@ -176,7 +156,7 @@ These settings are `false` by default:
 | `empty_response_max_attempts` | `4` | Retries for empty API responses |
 | `empty_response_retry_delay_ms` | `2000` | Delay between retries |
 | `claude_tool_hardening` | `true` | Prevent tool parameter hallucination |
-| `max_rate_limit_wait_seconds` | `300` | Max wait time when rate limited (0=unlimited) |
+| `max_rate_limit_wait_seconds` | `30` | Longest wait for a rate-limited account. A longer wait fails the request right away, naming each limited account and when it frees up (OpenCode shows nothing while the plugin waits). `0` waits indefinitely. |
 
 </details>
 
@@ -188,20 +168,6 @@ These settings are `false` by default:
 | `proactive_token_refresh` | `true` | Refresh tokens before expiry |
 | `proactive_refresh_buffer_seconds` | `1800` | Refresh 30 min before expiry |
 | `proactive_refresh_check_interval_seconds` | `300` | Check interval |
-
-</details>
-
-<details>
-<summary><b>Signature Cache (internal)</b></summary>
-
-Used when `keep_thinking: true`. Most users don't need to configure this.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `signature_cache.enabled` | `true` | Enable disk caching |
-| `signature_cache.memory_ttl_seconds` | `3600` | In-memory cache TTL (1 hour) |
-| `signature_cache.disk_ttl_seconds` | `172800` | Disk cache TTL (48 hours) |
-| `signature_cache.write_interval_seconds` | `60` | Background write interval |
 
 </details>
 

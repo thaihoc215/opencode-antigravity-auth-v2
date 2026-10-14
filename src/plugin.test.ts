@@ -366,7 +366,9 @@ describe("createAntigravityCore loader disk OAuth promotion", () => {
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
           { method: "POST", body: "{}" },
         ),
-      ).rejects.toThrow("All 1 account(s) rate-limited for gemini");
+      ).rejects.toThrow(
+        /All 1 account\(s\) rate-limited for gemini-2\.5-pro \(test@example\.com\)\..*raise max_rate_limit_wait_seconds \(now 1s\)/,
+      );
 
       expect(aggregateSpy).toHaveBeenCalledWith(
         "gemini",
@@ -425,12 +427,14 @@ describe("createAntigravityCore loader disk OAuth promotion", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const onAccountsRevoked = vi.fn(async () => undefined);
+    vi.mocked(storageModule.saveAccounts).mockClear();
+    vi.mocked(storageModule.removeAccountFromStorage).mockClear();
 
     try {
       const loader = await loadRoute(async () => ({ type: "api", key: "secret" }), onAccountsRevoked);
 
-      // Drive the OAuth fetch handler through the invalid_grant cleanup path.
-      // It will throw "All Antigravity accounts have invalid refresh tokens...".
+      // Drive the OAuth fetch handler through the invalid_grant path.
+      // It will throw "Google revoked the sign-in of every Antigravity account...".
       try {
         await (loader as { fetch: typeof fetch }).fetch(
           "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.1-pro:generateContent",
@@ -448,7 +452,13 @@ describe("createAntigravityCore loader disk OAuth promotion", () => {
       expect(tokenRefreshCalls.length).toBeGreaterThan(0);
 
       expect(onAccountsRevoked).not.toHaveBeenCalled();
-      expect(storageModule.removeAccountFromStorage).toHaveBeenCalledWith("fake-refresh-token");
+      // The account is kept, disabled and marked revoked, so it can be signed in again.
+      expect(storageModule.removeAccountFromStorage).not.toHaveBeenCalled();
+      await vi.waitFor(() => {
+        const saved = vi.mocked(storageModule.saveAccounts).mock.calls.at(-1)?.[0];
+        expect(saved?.accounts[0]).toMatchObject({ refreshToken: "fake-refresh-token", enabled: false });
+        expect(saved?.accounts[0]?.revokedAt).toBeTypeOf("number");
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -535,7 +545,7 @@ describe("createAntigravityCore loader disk OAuth promotion", () => {
       await expect(loader!.fetch(
         "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.1-pro:generateContent",
         { method: "POST", body: "{}" },
-      )).rejects.toThrow("invalid refresh tokens");
+      )).rejects.toThrow("Google revoked the sign-in of every Antigravity account");
       expect(onAccountsRevoked).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();

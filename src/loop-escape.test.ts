@@ -7,6 +7,7 @@ const { loopEscapeTestHooks } = await import("./plugin");
 const { ANTIGRAVITY_ENDPOINT_FALLBACKS, ANTIGRAVITY_ENDPOINT_PROD } = await import("./constants");
 
 const hooks = loopEscapeTestHooks;
+type ManagedAccount = import("./plugin/accounts").ManagedAccount;
 
 beforeEach(() => {
   hooks.resetAllInternalState();
@@ -52,48 +53,6 @@ describe("fix 1: capacity-retry loop escape decision (hasUsableEndpointAfterInde
   });
 });
 
-describe("fix 2: warmup retry cap actually engages", () => {
-  it("stops attempting warmup after MAX_WARMUP_RETRIES (2) failed attempts", () => {
-    const sessionId = "session-warmup-failures";
-    // Two attempts are allowed...
-    expect(hooks.trackWarmupAttempt(sessionId)).toBe(true);
-    expect(hooks.getWarmupAttemptCount(sessionId)).toBe(1);
-    expect(hooks.trackWarmupAttempt(sessionId)).toBe(true);
-    expect(hooks.getWarmupAttemptCount(sessionId)).toBe(2);
-    // ...the third is capped (previously the dead cap allowed it forever).
-    expect(hooks.trackWarmupAttempt(sessionId)).toBe(false);
-    expect(hooks.getWarmupAttemptCount(sessionId)).toBe(2);
-  });
-
-  it("stops attempting warmup once a session has succeeded", () => {
-    const sessionId = "session-warmup-success";
-    expect(hooks.trackWarmupAttempt(sessionId)).toBe(true);
-    hooks.markWarmupSuccess(sessionId);
-    expect(hooks.trackWarmupAttempt(sessionId)).toBe(false);
-  });
-
-  it("counts attempts independently per session", () => {
-    expect(hooks.trackWarmupAttempt("a")).toBe(true);
-    expect(hooks.trackWarmupAttempt("b")).toBe(true);
-    expect(hooks.getWarmupAttemptCount("a")).toBe(1);
-    expect(hooks.getWarmupAttemptCount("b")).toBe(1);
-  });
-
-  it("retrying the OLDEST tracked session at capacity does not reset its count (eviction guard)", () => {
-    const cap = hooks.MAX_WARMUP_SESSIONS;
-    // Fill the map to exactly capacity; the oldest key is "s0".
-    for (let i = 0; i < cap; i++) {
-      expect(hooks.trackWarmupAttempt(`s${i}`)).toBe(true);
-    }
-    // Retry the oldest session. Before the fix, unconditional eviction deleted
-    // "s0" first, resetting its count to 0 and wrongly permitting a 3rd attempt.
-    expect(hooks.trackWarmupAttempt("s0")).toBe(true);
-    expect(hooks.getWarmupAttemptCount("s0")).toBe(2); // incremented, not reset to 1
-    // The cap now holds for s0.
-    expect(hooks.trackWarmupAttempt("s0")).toBe(false);
-  });
-});
-
 describe("fix 1 (review): capacity fallback prefers the alternate quota pool on the same account", () => {
   // The terminal capacity-escape marks the current pool rate-limited BEFORE asking
   // for the available header style, so getAvailableHeaderStyle returns the ALTERNATE
@@ -136,48 +95,26 @@ describe("fix 1 (review): capacity fallback prefers the alternate quota pool on 
   });
 });
 
-describe("fix 3: index-keyed state remap after account removal", () => {
-  it("remapIndexAfterRemoval drops the removed index and shifts higher indices down", () => {
-    expect(hooks.remapIndexAfterRemoval(0, 1)).toBe(0); // below removed -> unchanged
-    expect(hooks.remapIndexAfterRemoval(1, 1)).toBe(null); // removed -> dropped
-    expect(hooks.remapIndexAfterRemoval(2, 1)).toBe(1); // above removed -> shift down
-    expect(hooks.remapIndexAfterRemoval(3, 1)).toBe(2);
+describe("per-account request state follows the account, not its position", () => {
+  // Every route in the process shares the pool (account-pool.ts), and accounts
+  // can be appended or disabled while requests run, so state is keyed by the
+  // account object. Two accounts with the same index never share state.
+  const first = { index: 0, email: "a@example.com" } as ManagedAccount;
+  const second = { index: 0, email: "b@example.com" } as ManagedAccount;
+
+  it("keeps rate-limit backoff per account and quota key", () => {
+    expect(hooks.getRateLimitBackoff(first, "claude", null).attempt).toBe(1);
+    expect(hooks.getRateLimitConsecutive(first, "claude")).toBe(1);
+    expect(hooks.getRateLimitConsecutive(first, "gemini-cli")).toBe(undefined);
+    expect(hooks.getRateLimitConsecutive(second, "claude")).toBe(undefined);
   });
 
-  it("remapIndexSetAfterRemoval shifts a Set in place", () => {
-    const set = new Set<number>([0, 2, 3]);
-    hooks.remapIndexSetAfterRemoval(set, 1);
-    // 0 stays, index 1 was not present, 2->1, 3->2
-    expect([...set].sort((a, b) => a - b)).toEqual([0, 1, 2]);
-  });
-
-  it("remaps accountFailureState and rateLimitStateByAccountQuota, preserving values and quota keys", () => {
-    // Seed distinct, identifiable values at four indices.
-    hooks.seedAccountFailure(0, 10);
-    hooks.seedAccountFailure(1, 11);
-    hooks.seedAccountFailure(2, 12);
-    hooks.seedAccountFailure(3, 13);
-
-    hooks.seedRateLimitState(0, "gemini-cli", 100);
-    hooks.seedRateLimitState(1, "gemini-cli", 101);
-    hooks.seedRateLimitState(2, "gemini-antigravity", 102);
-    hooks.seedRateLimitState(3, "claude", 103);
-
-    // Remove the account at index 1 (renumbers 2->1, 3->2).
-    hooks.remapAccountStateAfterRemoval(1);
-
-    // accountFailureState: index 0 unchanged, 1 dropped, 2's value now at 1, 3's at 2.
-    expect(hooks.getAccountFailureCount(0)).toBe(10);
-    expect(hooks.getAccountFailureCount(1)).toBe(12);
-    expect(hooks.getAccountFailureCount(2)).toBe(13);
-    expect(hooks.getAccountFailureCount(3)).toBe(undefined);
-
-    // rateLimitStateByAccountQuota: removed index dropped, higher indices shifted,
-    // and the quota key travels with the value.
-    expect(hooks.getRateLimitConsecutive(0, "gemini-cli")).toBe(100);
-    expect(hooks.getRateLimitConsecutive(1, "gemini-cli")).toBe(undefined); // old index-1 entry gone
-    expect(hooks.getRateLimitConsecutive(1, "gemini-antigravity")).toBe(102); // was index 2
-    expect(hooks.getRateLimitConsecutive(2, "claude")).toBe(103); // was index 3
-    expect(hooks.getRateLimitConsecutive(3, "claude")).toBe(undefined);
+  it("keeps failure counts per account", () => {
+    hooks.trackAccountFailure(first);
+    hooks.trackAccountFailure(first);
+    hooks.seedAccountFailure(second, 4);
+    expect(hooks.getAccountFailureCount(first)).toBe(2);
+    expect(hooks.getAccountFailureCount(second)).toBe(4);
+    expect(hooks.trackAccountFailure(second).shouldCooldown).toBe(true);
   });
 });

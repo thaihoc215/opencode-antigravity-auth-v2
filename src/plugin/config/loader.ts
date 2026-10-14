@@ -59,10 +59,20 @@ function loadConfigFile(path: string): Partial<AntigravityConfig> | null {
   }
 }
 
+/** Options that were removed; a config that still sets them loads, with a warning. */
+const REMOVED_OPTIONS = ["keep_thinking", "signature_cache", "quiet_mode"] as const;
+
 /**
  * Validate a partial config object, returning null (and logging) when invalid.
  */
 function parsePartialConfig(rawConfig: unknown, source: string): Partial<AntigravityConfig> | null {
+  if (rawConfig && typeof rawConfig === "object") {
+    const removed = REMOVED_OPTIONS.filter((key) => key in rawConfig);
+    if (removed.length > 0) {
+      log.warn("Ignoring removed options", { path: source, removed: removed.join(", ") });
+    }
+  }
+
   // Validate with Zod (partial - we'll merge with defaults later)
   const result = AntigravityConfigSchema.partial().safeParse(rawConfig);
 
@@ -101,23 +111,13 @@ function withoutUserOnlyOptions(
 }
 
 /**
- * Deep merge two config objects, with override taking precedence.
+ * Merge two config objects, with override taking precedence.
  */
 function mergeConfigs(
   base: AntigravityConfig,
   override: Partial<AntigravityConfig>
 ): AntigravityConfig {
-  return {
-    ...base,
-    ...override,
-    // Deep merge signature_cache if both exist
-    signature_cache: override.signature_cache
-      ? {
-          ...base.signature_cache,
-          ...override.signature_cache,
-        }
-      : base.signature_cache,
-  };
+  return { ...base, ...override };
 }
 
 // =============================================================================
@@ -174,12 +174,3 @@ export function getDefaultLogsDir(): string {
   return join(getConfigDir(), "antigravity-logs");
 }
 
-let runtimeConfig: AntigravityConfig | null = null;
-
-export function initRuntimeConfig(config: AntigravityConfig): void {
-  runtimeConfig = config;
-}
-
-export function getKeepThinking(): boolean {
-  return runtimeConfig?.keep_thinking ?? false;
-}

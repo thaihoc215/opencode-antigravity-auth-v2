@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createAntigravityCore, isRemovedModelId } from "../plugin";
 import { isOAuthAuth, parseRefreshParts } from "../plugin/auth";
 import { OPENCODE_MODEL_DEFINITIONS } from "../plugin/config/models";
+import { watchAccountPoolFile } from "../plugin/account-pool";
 import { createLogger } from "../plugin/logger";
 import { createBrowserOAuthAuthorization, replaceStoredAccount } from "../plugin/oauth-flow";
 import { hashRefreshToken, loadAccounts } from "../plugin/storage";
@@ -33,7 +34,7 @@ export const OAUTH_METHOD_ID = "antigravity";
 const OAUTH_METHOD_LABEL = "OAuth with Google (Antigravity)";
 const PROVIDER_ID = ANTIGRAVITY_PROVIDER_ID;
 
-/** Credential events often come in bursts (sign-in, then token storage). */
+/** Credential events and pool writes often come in bursts (sign-in, then token storage). */
 const CREDENTIAL_EVENT_DEBOUNCE_MS = 300;
 const MAX_RESUBSCRIBE_DELAY_MS = 30_000;
 
@@ -66,17 +67,17 @@ async function loadPool(): Promise<PoolAccountSummary[]> {
 }
 
 /**
- * What the loader and the login form depend on: the active credential and
- * the pool's accounts. Tokens are hashed; the key never leaves this process.
+ * Identifies the active google credential, which the loader depends on.
+ * Tokens are hashed; the key never leaves this process.
  */
-function credentialKey(auth: AuthDetails, pool: readonly PoolAccountSummary[]): string {
-  let credential: string = auth.type;
+function credentialKey(auth: AuthDetails): string {
   if (isOAuthAuth(auth)) {
-    credential = `oauth:${hashRefreshToken(parseRefreshParts(auth.refresh).refreshToken)}`;
-  } else if (typeof auth.key === "string") {
-    credential = `${auth.type}:${hashRefreshToken(auth.key)}`;
+    return `oauth:${hashRefreshToken(parseRefreshParts(auth.refresh).refreshToken)}`;
   }
-  return JSON.stringify([credential, pool]);
+  if (typeof auth.key === "string") {
+    return `${auth.type}:${hashRefreshToken(auth.key)}`;
+  }
+  return auth.type;
 }
 
 function toCredential(result: AntigravityTokenExchangeResult): Credential.OAuth {
@@ -142,7 +143,8 @@ const server: Plugin.Plugin = {
     // background and applied with ctx.provider.reload().
     let pool = await loadPool();
     let modelDefinitions: Record<string, ProviderModel> = OPENCODE_MODEL_DEFINITIONS;
-    let lastCredentialKey = credentialKey(await getAuth().catch(() => ({ type: "none" })), pool);
+    let lastCredentialKey = credentialKey(await getAuth().catch(() => ({ type: "none" })));
+    let lastPoolKey = JSON.stringify(pool);
 
     // The core's route (account pool + Antigravity fetch). It is built on first
     // use and again after credentials change; SDKs cached by OpenCode keep
@@ -297,18 +299,30 @@ const server: Plugin.Plugin = {
     });
 
     // credential.updated / credential.switched carry no data and fire for every
-    // provider. Rebuild only when the google credential or the pool changed.
+    // provider; the pool file changes when the account manager CLI (or another
+    // process) edits it. Rebuild the route only when the google credential
+    // changed or the pool became empty or non-empty. Other pool changes are
+    // applied by the shared pool itself (see account-pool.ts); only the
+    // sign-in form, which lists the accounts, is reloaded.
     let checking: Promise<void> = Promise.resolve();
     const checkCredentials = () => {
       checking = checking.then(async () => {
         const nextPool = await loadPool();
-        const key = credentialKey(await getAuth().catch(() => ({ type: "none" })), nextPool);
-        if (key === lastCredentialKey) return;
-        lastCredentialKey = key;
+        const nextCredentialKey = credentialKey(await getAuth().catch(() => ({ type: "none" })));
+        const nextPoolKey = JSON.stringify(nextPool);
+        const credentialChanged = nextCredentialKey !== lastCredentialKey;
+        if (!credentialChanged && nextPoolKey === lastPoolKey) return;
+        const activationChanged = (nextPool.length > 0) !== (pool.length > 0);
+        lastCredentialKey = nextCredentialKey;
+        lastPoolKey = nextPoolKey;
         pool = nextPool;
-        await resetRoute();
+        if (credentialChanged || activationChanged) {
+          await resetRoute();
+          await ctx.integration.reload();
+          await refreshProvider();
+          return;
+        }
         await ctx.integration.reload();
-        await refreshProvider();
       }).catch((error) => {
         log.warn("Failed to apply credential change", { error: error instanceof Error ? error.message : String(error) });
       });
@@ -352,10 +366,13 @@ const server: Plugin.Plugin = {
       }
     })();
 
+    const unwatchPool = watchAccountPoolFile(scheduleCheck);
+
     void refreshProvider();
 
     return async () => {
       abort.abort();
+      unwatchPool();
       if (debounce) clearTimeout(debounce);
       await resetRoute();
       await core.dispose();

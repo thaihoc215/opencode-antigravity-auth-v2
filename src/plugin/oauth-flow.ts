@@ -115,6 +115,10 @@ function clampInt(value: number, min: number, max: number): number {
  * Adds sign-ins to the pool, updating an existing account with the same email
  * or refresh token. With `replaceAll`, the sign-ins become the whole pool and
  * every other account is deleted ("start fresh").
+ *
+ * Signing in an account whose token Google revoked enables it again. A
+ * replaced refresh token is tombstoned, so a running server saving its
+ * in-memory copy of the old entry cannot bring it back.
  */
 export async function persistAccountPool(
   results: AntigravityTokenExchangeSuccess[],
@@ -127,6 +131,7 @@ export async function persistAccountPool(
   const now = Date.now();
   const stored = replaceAll ? null : await loadAccounts();
   const accounts = stored?.accounts ? [...stored.accounts] : [];
+  const replacedTokenHashes: string[] = [];
 
   const indexByRefreshToken = new Map<string, number>();
   const indexByEmail = new Map<string, number>();
@@ -182,11 +187,15 @@ export async function persistAccountPool(
       projectId: parts.projectId ?? existing.projectId,
       managedProjectId: parts.managedProjectId ?? existing.managedProjectId,
       lastUsed: now,
+      ...(existing.revokedAt !== undefined
+        ? { enabled: true, revokedAt: undefined, statusChangedAt: now }
+        : {}),
     };
 
     if (oldToken !== parts.refreshToken) {
       indexByRefreshToken.delete(oldToken);
       indexByRefreshToken.set(parts.refreshToken, existingIndex);
+      replacedTokenHashes.push(hashRefreshToken(oldToken));
     }
   }
 
@@ -203,6 +212,7 @@ export async function persistAccountPool(
     accounts,
     activeIndex: clamped,
     activeIndexByFamily: { claude: clamped, gemini: clamped },
+    ...(replacedTokenHashes.length > 0 ? { deletedRefreshTokenHashes: replacedTokenHashes } : {}),
   };
 
   if (replaceAll) {
