@@ -6,11 +6,13 @@ OpenCode's variant system lets you configure the thinking budget dynamically wit
 
 ## How Variants Work
 
-When you define a model with `variants`, OpenCode shows variant options in the model picker. Selecting a variant passes the `providerOptions` to the plugin, which extracts the thinking configuration.
+The plugin registers its models with `variants`, and OpenCode shows them in the model picker. Selecting a variant passes the `providerOptions` to the plugin, which extracts the thinking configuration. On OpenCode V2 a variant is selected with a `#variant` suffix:
 
 ```bash
-opencode run "Hello" --model=google/antigravity-claude-opus-4-6-thinking --variant=max
+opencode run "Hello" -m google/antigravity-claude-opus-4-6-thinking#max
 ```
+
+> **OpenCode V2:** the JSON examples below show each model's variant definitions in the 1.x config format. On V2 the plugin registers them itself (a `thinkingLevel` variant becomes Google provider options `{ "thinkingConfig": { "thinkingLevel": ... } }`), so you do not need to copy them into `opencode.json`.
 
 ---
 
@@ -50,14 +52,14 @@ The plugin accepts different variant formats depending on the model family:
 
 Gemini 3 models use string-based thinking levels. Available levels differ by model:
 
-| Level | Flash | 3.6 Flash | 3.7 Flash | Pro | Description |
-|-------|-------|-----------|-----------|-----|-------------|
-| `minimal` | ✅ | ❌ | ❌ | ❌ | Minimal thinking, lowest latency |
-| `low` | ✅ | ✅ | ✅ | ✅ | Light thinking |
-| `medium` | ✅ | ✅ | ✅ | ❌ | Balanced thinking |
-| `high` | ✅ | ✅ | ✅ | ✅ | Maximum thinking |
+| Level | Flash | 3.6 Flash | 3.7 Flash | 3.8 Flash | Pro | Description |
+|-------|-------|-----------|-----------|-----------|-----|-------------|
+| `minimal` | ✅ | ❌ | ❌ | ❌ | ❌ | Minimal thinking, lowest latency |
+| `low` | ✅ | ✅ | ✅ | ✅ | ✅ | Light thinking |
+| `medium` | ✅ | ✅ | ✅ | ✅ | ❌ | Balanced thinking |
+| `high` | ✅ | ✅ | ✅ | ✅ | ✅ | Maximum thinking |
 
-Default when no tier is requested: `low`, except **3.7 Flash, which defaults to
+Default when no tier is requested: `low`, except **3.7 and 3.8 Flash, which default to
 `high`**. This is a deliberate deviation — Google documents `medium` as 3.7's own
 default, and every other model here defaults to `low`. An untiered 3.7 selection
 therefore costs more per request than its siblings; pick `low` or `medium`
@@ -70,7 +72,7 @@ explicitly if that matters to you.
 > automatically; it only matters if you override the version yourself.
 
 > **Note:** The API rejects invalid levels (e.g., `"minimal"` on Pro). Configure variants accordingly.
-> Gemini 3.6 and 3.7 Flash serve only `low`/`medium`/`high`; a requested `minimal` is folded down to `low`.
+> Gemini 3.6, 3.7 and 3.8 Flash serve only `low`/`medium`/`high`; a requested `minimal` is folded down to `low`.
 
 ### Output token budget
 
@@ -82,7 +84,7 @@ The plugin restores the real budget for Gemini before the request leaves:
 
 | Model line | Restored `maxOutputTokens` |
 |---|---|
-| Gemini 3 Flash (3-flash, 3.5, 3.6, 3.7) | 65536 |
+| Gemini 3 Flash (3-flash, 3.5, 3.6, 3.7, 3.8) | 65536 |
 | Gemini 3 Pro (3.1 Pro, `gemini-pro-agent`) | 65535 |
 | Gemini 3.1 Flash Lite, Gemini 2.5 family | 65535 |
 | Image models, Claude, non-Gemini | untouched |
@@ -133,6 +135,31 @@ audio input:
 {
   "antigravity-gemini-3.7-flash": {
     "name": "Gemini 3.7 Flash (Antigravity)",
+    "limit": { "context": 1048576, "output": 65536 },
+    "modalities": {
+      "input": ["text", "image", "pdf", "video", "audio"],
+      "output": ["text"]
+    },
+    "variants": {
+      "low": { "thinkingLevel": "low" },
+      "medium": { "thinkingLevel": "medium" },
+      "high": { "thinkingLevel": "high" }
+    }
+  }
+}
+```
+
+### Gemini 3.8 Flash Example
+
+3.8 Flash matches 3.7: backend ids `gemini-3.8-flash-low` / `-medium` / `-high`,
+default `high`, context 1048576, output 65536, and video/audio input (Antigravity
+catalog, 2026-10-14). The catalog also lists `gemini-3.8-flash-tiered`, which the
+plugin does not expose. There is no 3.8 Flash Lite in the catalog.
+
+```json
+{
+  "antigravity-gemini-3.8-flash": {
+    "name": "Gemini 3.8 Flash (Antigravity)",
     "limit": { "context": 1048576, "output": 65536 },
     "modalities": {
       "input": ["text", "image", "pdf", "video", "audio"],

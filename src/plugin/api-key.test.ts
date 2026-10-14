@@ -650,6 +650,12 @@ describe("createAntigravityOnlyModelErrorResponse", () => {
     const body = await bodyOf(response);
     expect(body.error?.message).toContain("gemini-3.7-flash");
   });
+
+  it("suggests gemini-3.8-flash as a working public-API model", async () => {
+    const response = createAntigravityOnlyModelErrorResponse("gemini-3.1-pro");
+    const body = await bodyOf(response);
+    expect(body.error?.message).toContain("gemini-3.8-flash");
+  });
 });
 
 describe("Gemini 3.6 Flash public-API routing", () => {
@@ -670,6 +676,27 @@ describe("Gemini 3.6 Flash public-API routing", () => {
 
   it("does not treat gemini-3.6-flash as Antigravity-only", () => {
     expect(isLikelyAntigravityOnlyModel("gemini-3.6-flash")).toBe(false);
+  });
+});
+
+describe("Gemini 3.8 Flash public-API routing", () => {
+  it("routes bare and antigravity-prefixed 3.8 Flash through the api-key path", () => {
+    for (const model of [
+      "gemini-3.8-flash",
+      "antigravity-gemini-3.8-flash",
+      "antigravity-gemini-3.8-flash-high",
+    ]) {
+      expect(
+        isAgySdkSupportedRequest(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        ),
+        `model=${model}`,
+      ).toBe(true);
+    }
+  });
+
+  it("does not treat gemini-3.8-flash as Antigravity-only", () => {
+    expect(isLikelyAntigravityOnlyModel("gemini-3.8-flash")).toBe(false);
   });
 });
 

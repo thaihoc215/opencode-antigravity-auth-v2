@@ -60,10 +60,6 @@ let tryFetchWithAgySdkCredentials: TryFetchWithAgySdkCredentials | undefined;
 let verifyAccountAccess: VerifyAccountAccess | undefined;
 
 beforeAll(async () => {
-  vi.mock("@opencode-ai/plugin", () => ({
-    tool: vi.fn(),
-  }));
-
   const { __testExports } = await import("../plugin");
   resolveQuotaFallbackHeaderStyle = (__testExports as {
     resolveQuotaFallbackHeaderStyle?: ResolveQuotaFallbackHeaderStyle;

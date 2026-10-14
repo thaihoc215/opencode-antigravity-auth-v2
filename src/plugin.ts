@@ -1,5 +1,4 @@
 import { exec } from "node:child_process";
-import { tool } from "@opencode-ai/plugin";
 import {
   ANTIGRAVITY_DEFAULT_PROJECT_ID,
   ANTIGRAVITY_ENDPOINT,
@@ -41,7 +40,14 @@ import {
 import { EmptyResponseError } from "./plugin/errors";
 import { AntigravityTokenRefreshError, refreshAccessToken } from "./plugin/token";
 import { startOAuthListener, type OAuthListener } from "./plugin/server";
-import { clearAccounts, loadAccounts, removeAccountFromStorage, saveAccounts } from "./plugin/storage";
+import {
+  clearAccounts,
+  hashRefreshToken,
+  loadAccounts,
+  removeAccountFromStorage,
+  saveAccounts,
+  saveAccountsReplace,
+} from "./plugin/storage";
 import { AccountManager, type ModelFamily, parseRateLimitReason, calculateBackoffMs, computeSoftQuotaCacheTtlMs } from "./plugin/accounts";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import { loadConfig, initRuntimeConfig, type AntigravityConfig } from "./plugin/config";
@@ -75,8 +81,11 @@ import { recordPublicGeminiApiModels } from "./plugin/model-catalog";
 import type { AgySdkCredential } from "./plugin/api-key";
 import type {
   AuthDetails,
+  CoreTool,
   GetAuth,
+  GoogleSearchArgs,
   LoaderResult,
+  OAuthAuthorizationResult,
   PluginClient,
   PluginContext,
   PluginResult,
@@ -84,6 +93,7 @@ import type {
   Provider,
   ProviderModel,
 } from "./plugin/types";
+import { GOOGLE_SEARCH_INPUT_SCHEMA } from "./plugin/types";
 
 const MAX_OAUTH_ACCOUNTS = 10;
 const MAX_WARMUP_SESSIONS = 1000;
@@ -302,7 +312,7 @@ function costForProviderModel(model: ProviderModel, existing: ProviderModel | un
  * "gemini-3-flash-agent" (used by gemini-3.5-flash high tier) is never passed
  * through this hook, so it is unaffected.
  */
-function isRemovedModelId(modelId: string): boolean {
+export function isRemovedModelId(modelId: string): boolean {
   const id = modelId
     .toLowerCase()
     .replace(/^antigravity-/, "")
@@ -1147,6 +1157,210 @@ async function persistAccountPool(
   });
 }
 
+type AntigravityTokenExchangeSuccess = Extract<AntigravityTokenExchangeResult, { type: "success" }>;
+
+/**
+ * Replaces the stored account at `index` with a fresh sign-in, as the
+ * interactive "re-authenticate" action does. Rate-limit and verification
+ * state of the old entry is dropped; `addedAt` and project ids are kept.
+ *
+ * Writes with `saveAccountsReplace`: `saveAccounts` merges by refresh token,
+ * which would keep the old entry next to the new one (Google usually issues a
+ * new token) or merge the old state back (when it does not). A replaced token
+ * is tombstoned so a running plugin saving its in-memory pool cannot restore it.
+ */
+export async function replaceStoredAccount(index: number, result: AntigravityTokenExchangeSuccess): Promise<void> {
+  const currentStorage = await loadAccounts();
+  if (!currentStorage) {
+    return;
+  }
+  const updatedAccounts = [...currentStorage.accounts];
+  const parts = parseRefreshParts(result.refresh);
+  if (!parts.refreshToken) {
+    return;
+  }
+  const oldRefreshToken = updatedAccounts[index]?.refreshToken;
+  updatedAccounts[index] = {
+    email: result.email ?? updatedAccounts[index]?.email,
+    refreshToken: parts.refreshToken,
+    projectId: parts.projectId ?? updatedAccounts[index]?.projectId,
+    managedProjectId: parts.managedProjectId ?? updatedAccounts[index]?.managedProjectId,
+    addedAt: updatedAccounts[index]?.addedAt ?? Date.now(),
+    lastUsed: Date.now(),
+  };
+  const tombstoneOldToken = oldRefreshToken !== undefined && oldRefreshToken !== parts.refreshToken;
+  await saveAccountsReplace({
+    version: 4,
+    accounts: updatedAccounts,
+    activeIndex: currentStorage.activeIndex,
+    activeIndexByFamily: currentStorage.activeIndexByFamily,
+    ...(tombstoneOldToken ? { deletedRefreshTokenHashes: [hashRefreshToken(oldRefreshToken)] } : {}),
+  });
+}
+
+function isHeadlessEnvironment(): boolean {
+  return !!(
+    process.env.SSH_CONNECTION ||
+    process.env.SSH_CLIENT ||
+    process.env.SSH_TTY ||
+    process.env.OPENCODE_HEADLESS
+  );
+}
+
+export interface BrowserOAuthOptions {
+  /** Pre-selects this Google account on the consent screen (`login_hint`). */
+  loginHint?: string;
+  /**
+   * Stores a successful sign-in. A rejection fails the sign-in with its
+   * message. Defaults to adding the account to the pool (non-destructive).
+   */
+  persist?: (result: AntigravityTokenExchangeSuccess) => Promise<void>;
+}
+
+/**
+ * Non-interactive browser sign-in: opens the Google consent page and returns
+ * an auto (localhost redirect) or code (paste) authorization. Used by the
+ * `/connect` flow and by the OpenCode V2 integration method.
+ */
+export async function createBrowserOAuthAuthorization(
+  client: PluginClient,
+  options: BrowserOAuthOptions = {},
+): Promise<OAuthAuthorizationResult> {
+  const projectId = "";
+
+  // Check existing accounts count for toast message
+  const existingStorage = await loadAccounts();
+  const existingCount = existingStorage?.accounts.length ?? 0;
+
+  const addToPool = async (result: AntigravityTokenExchangeSuccess) => {
+    try {
+      await persistAccountPool([result], false);
+    } catch {
+      // ignore
+    }
+
+    const newTotal = existingCount + 1;
+    const toastMessage = existingCount > 0
+      ? `Added account${result.email ? ` (${result.email})` : ""} - ${newTotal} total`
+      : `Authenticated${result.email ? ` (${result.email})` : ""}`;
+
+    try {
+      await client.tui.showToast({
+        body: {
+          message: toastMessage,
+          variant: "success",
+        },
+      });
+    } catch {
+      // TUI may not be available
+    }
+  };
+  const persist = options.persist ?? addToPool;
+
+  const finish = async (result: AntigravityTokenExchangeResult): Promise<AntigravityTokenExchangeResult> => {
+    if (result.type !== "success") {
+      return result;
+    }
+    try {
+      await persist(result);
+    } catch (error) {
+      return { type: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+    return result;
+  };
+
+  const useManualFlow = isHeadlessEnvironment() || shouldSkipLocalServer();
+
+  let listener: OAuthListener | null = null;
+  if (!useManualFlow) {
+    try {
+      listener = await startOAuthListener();
+    } catch {
+      listener = null;
+    }
+  }
+
+  const authorization = await authorizeAntigravity(projectId);
+  if (options.loginHint) {
+    const url = new URL(authorization.url);
+    url.searchParams.set("login_hint", options.loginHint);
+    authorization.url = url.toString();
+  }
+  const fallbackState = getStateFromAuthorizationUrl(authorization.url);
+
+  if (!useManualFlow) {
+    const browserOpened = await openBrowser(authorization.url);
+    if (!browserOpened) {
+      listener?.close().catch(() => {});
+      listener = null;
+    }
+  }
+
+  if (listener) {
+    const activeListener = listener;
+    return {
+      url: authorization.url,
+      instructions:
+        "Complete sign-in in your browser. We'll automatically detect the redirect back to localhost.",
+      method: "auto",
+      callback: async (): Promise<AntigravityTokenExchangeResult> => {
+        const CALLBACK_TIMEOUT_MS = 30000;
+        try {
+          const callbackPromise = activeListener.waitForCallback();
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("CALLBACK_TIMEOUT")), CALLBACK_TIMEOUT_MS),
+          );
+
+          let callbackUrl: URL;
+          try {
+            callbackUrl = await Promise.race([callbackPromise, timeoutPromise]);
+          } catch (err) {
+            if (err instanceof Error && err.message === "CALLBACK_TIMEOUT") {
+              return {
+                type: "failed",
+                error: "Callback timeout - please use CLI with --no-browser flag for manual input",
+              };
+            }
+            throw err;
+          }
+
+          const params = extractOAuthCallbackParams(callbackUrl);
+          if (!params) {
+            return { type: "failed", error: "Missing code or state in callback URL" };
+          }
+
+          return await finish(await exchangeAntigravity(params.code, params.state));
+        } catch (error) {
+          return {
+            type: "failed",
+            error: error instanceof Error ? error.message : "Unknown error",
+          };
+        } finally {
+          try {
+            await activeListener.close();
+          } catch {
+          }
+        }
+      },
+    };
+  }
+
+  return {
+    url: authorization.url,
+    instructions:
+      "Visit the URL above, complete OAuth, then paste either the full redirect URL or the authorization code.",
+    method: "code",
+    callback: async (codeInput: string): Promise<AntigravityTokenExchangeResult> => {
+      const params = parseOAuthCallbackInput(codeInput, fallbackState);
+      if ("error" in params) {
+        return { type: "failed", error: params.error };
+      }
+
+      return finish(await exchangeAntigravity(params.code, params.state));
+    },
+  };
+}
+
 function buildAuthSuccessFromStoredAccount(account: {
   refreshToken: string;
   projectId?: string;
@@ -1639,10 +1853,10 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
  * Creates an Antigravity OAuth plugin for a specific provider ID.
  */
 export const createAntigravityPlugin = (providerId: string) => async (
-  { client, directory }: PluginContext,
+  { client, directory, options }: PluginContext,
 ): Promise<PluginResult> => {
-  // Load configuration from files and environment variables
-  const config = loadConfig(directory);
+  // Load configuration from files, environment variables, and plugin options
+  const config = loadConfig(directory, options);
   initRuntimeConfig(config);
 
   // Cached getAuth function for tool access
@@ -1654,8 +1868,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
   // Initialize structured logger for TUI integration
   initLogger(client);
   
-  // Fetch latest Antigravity version from remote API (non-blocking, falls back to hardcoded)
-  await initAntigravityVersion();
+  // Fetch latest Antigravity version from remote API in the background (falls back
+  // to hardcoded). Plugin setup must stay fast: OpenCode V2 gives plugins a few
+  // seconds to activate. Model discovery and the loader wait for it, since the
+  // reported version gates the backend's model catalog.
+  const versionReady = initAntigravityVersion().catch(() => {});
   
   // Initialize health tracker for hybrid strategy
   if (config.health_score) {
@@ -1762,14 +1979,10 @@ export const createAntigravityPlugin = (providerId: string) => async (
   };
 
   // Create google_search tool with access to auth context
-  const googleSearchTool = tool({
+  const googleSearchTool: CoreTool<GoogleSearchArgs> = {
     description: "Search the web using Google Search and analyze URLs. Returns real-time information from the internet with source citations. Use this when you need up-to-date information about current events, recent developments, or any topic that may have changed. You can also provide specific URLs to analyze. IMPORTANT: If the user mentions or provides any URLs in their query, you MUST extract those URLs and pass them in the 'urls' parameter for direct analysis.",
-    args: {
-      query: tool.schema.string().describe("The search query or question to answer using web search"),
-      urls: tool.schema.array(tool.schema.string()).optional().describe("List of specific URLs to fetch and analyze. IMPORTANT: Always extract and include any URLs mentioned by the user in their query here."),
-      thinking: tool.schema.boolean().optional().default(true).describe("Enable deep thinking for more thorough analysis (default: true)"),
-    },
-    async execute(args, ctx) {
+    input: GOOGLE_SEARCH_INPUT_SCHEMA,
+    async execute(args, signal) {
       log.debug("Google Search tool called", { query: args.query, urlCount: args.urls?.length ?? 0 });
 
       // Get current auth context
@@ -1801,14 +2014,14 @@ export const createAntigravityPlugin = (providerId: string) => async (
         {
           query: args.query,
           urls: args.urls,
-          thinking: args.thinking,
+          thinking: args.thinking ?? true,
         },
         accessToken,
         projectId,
-        ctx.abort,
+        signal,
       );
     },
-  });
+  };
 
   return {
     event: eventHandler,
@@ -1818,6 +2031,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
     provider: {
       id: providerId,
       async models(provider: Provider, context): Promise<Record<string, ProviderModel>> {
+        await versionReady;
         const fallbackModels = normalizeProviderHookModels(
           providerId,
           provider,
@@ -1861,6 +2075,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
     loader: async (getAuth: GetAuth, provider: Provider): Promise<LoaderResult | Record<string, unknown>> => {
       // Cache getAuth for tool access
       cachedGetAuth = getAuth;
+      await versionReady;
 
       const initialAuth = await getAuth();
       // Captured for the OAuth fetch handler's invalid_grant cleanup: only
@@ -3355,13 +3570,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
         label: "OAuth with Google (Antigravity)",
         type: "oauth",
         authorize: async (inputs?: Record<string, string>) => {
-          const isHeadless = !!(
-            process.env.SSH_CONNECTION ||
-            process.env.SSH_CLIENT ||
-            process.env.SSH_TTY ||
-            process.env.OPENCODE_HEADLESS
-          );
-
           // CLI flow (`opencode auth login`) passes an inputs object.
           if (inputs) {
             const accounts: Array<Extract<AntigravityTokenExchangeResult, { type: "success" }>> = [];
@@ -3869,7 +4077,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 }
 
                 let listener: OAuthListener | null = null;
-                if (!isHeadless) {
+                if (!isHeadlessEnvironment()) {
                   try {
                     listener = await startOAuthListener();
                   } catch {
@@ -3877,7 +4085,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   }
                 }
 
-                if (!isHeadless) {
+                if (!isHeadlessEnvironment()) {
                   await openBrowser(authorization.url);
                 }
 
@@ -3965,27 +4173,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
 
               try {
                 if (refreshAccountIndex !== undefined) {
-                  const currentStorage = await loadAccounts();
-                  if (currentStorage) {
-                    const updatedAccounts = [...currentStorage.accounts];
-                    const parts = parseRefreshParts(result.refresh);
-                    if (parts.refreshToken) {
-                      updatedAccounts[refreshAccountIndex] = {
-                        email: result.email ?? updatedAccounts[refreshAccountIndex]?.email,
-                        refreshToken: parts.refreshToken,
-                        projectId: parts.projectId ?? updatedAccounts[refreshAccountIndex]?.projectId,
-                        managedProjectId: parts.managedProjectId ?? updatedAccounts[refreshAccountIndex]?.managedProjectId,
-                        addedAt: updatedAccounts[refreshAccountIndex]?.addedAt ?? Date.now(),
-                        lastUsed: Date.now(),
-                      };
-                      await saveAccounts({
-                        version: 4,
-                        accounts: updatedAccounts,
-                        activeIndex: currentStorage.activeIndex,
-                        activeIndexByFamily: currentStorage.activeIndexByFamily,
-                      });
-                    }
-                  }
+                  await replaceStoredAccount(refreshAccountIndex, result);
                 } else {
                   const isFirstAccount = accounts.length === 1;
                   await persistAccountPool([result], isFirstAccount && startFresh);
@@ -4052,146 +4240,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
           // TUI flow (`/connect`) does not support per-account prompts.
           // Default to adding new accounts (non-destructive).
           // Users can run `opencode auth logout` first if they want a fresh start.
-          const projectId = "";
-
-          // Check existing accounts count for toast message
-          const existingStorage = await loadAccounts();
-          const existingCount = existingStorage?.accounts.length ?? 0;
-
-          const useManualFlow = isHeadless || shouldSkipLocalServer();
-
-          let listener: OAuthListener | null = null;
-          if (!useManualFlow) {
-            try {
-              listener = await startOAuthListener();
-            } catch {
-              listener = null;
-            }
-          }
-
-          const authorization = await authorizeAntigravity(projectId);
-          const fallbackState = getStateFromAuthorizationUrl(authorization.url);
-
-          if (!useManualFlow) {
-            const browserOpened = await openBrowser(authorization.url);
-            if (!browserOpened) {
-              listener?.close().catch(() => {});
-              listener = null;
-            }
-          }
-
-          if (listener) {
-            return {
-              url: authorization.url,
-              instructions:
-                "Complete sign-in in your browser. We'll automatically detect the redirect back to localhost.",
-              method: "auto",
-              callback: async (): Promise<AntigravityTokenExchangeResult> => {
-                const CALLBACK_TIMEOUT_MS = 30000;
-                try {
-                  const callbackPromise = listener.waitForCallback();
-                  const timeoutPromise = new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error("CALLBACK_TIMEOUT")), CALLBACK_TIMEOUT_MS),
-                  );
-
-                  let callbackUrl: URL;
-                  try {
-                    callbackUrl = await Promise.race([callbackPromise, timeoutPromise]);
-                  } catch (err) {
-                    if (err instanceof Error && err.message === "CALLBACK_TIMEOUT") {
-                      return {
-                        type: "failed",
-                        error: "Callback timeout - please use CLI with --no-browser flag for manual input",
-                      };
-                    }
-                    throw err;
-                  }
-
-                  const params = extractOAuthCallbackParams(callbackUrl);
-                  if (!params) {
-                    return { type: "failed", error: "Missing code or state in callback URL" };
-                  }
-
-                  const result = await exchangeAntigravity(params.code, params.state);
-                  if (result.type === "success") {
-                    try {
-                      await persistAccountPool([result], false);
-                    } catch {
-                    }
-
-                    const newTotal = existingCount + 1;
-                    const toastMessage = existingCount > 0
-                      ? `Added account${result.email ? ` (${result.email})` : ""} - ${newTotal} total`
-                      : `Authenticated${result.email ? ` (${result.email})` : ""}`;
-
-                    try {
-                      await client.tui.showToast({
-                        body: {
-                          message: toastMessage,
-                          variant: "success",
-                        },
-                      });
-                    } catch {
-                    }
-                  }
-
-                  return result;
-                } catch (error) {
-                  return {
-                    type: "failed",
-                    error: error instanceof Error ? error.message : "Unknown error",
-                  };
-                } finally {
-                  try {
-                    await listener.close();
-                  } catch {
-                  }
-                }
-              },
-            };
-          }
-
-          return {
-            url: authorization.url,
-            instructions:
-              "Visit the URL above, complete OAuth, then paste either the full redirect URL or the authorization code.",
-            method: "code",
-            callback: async (codeInput: string): Promise<AntigravityTokenExchangeResult> => {
-              const params = parseOAuthCallbackInput(codeInput, fallbackState);
-              if ("error" in params) {
-                return { type: "failed", error: params.error };
-              }
-
-              const result = await exchangeAntigravity(params.code, params.state);
-              if (result.type === "success") {
-                try {
-                  // TUI flow adds to existing accounts (non-destructive)
-                  await persistAccountPool([result], false);
-                } catch {
-                  // ignore
-                }
-
-                // Show appropriate toast message
-                const newTotal = existingCount + 1;
-                const toastMessage = existingCount > 0
-                  ? `Added account${result.email ? ` (${result.email})` : ""} - ${newTotal} total`
-                  : `Authenticated${result.email ? ` (${result.email})` : ""}`;
-
-                try {
-                  await client.tui.showToast({
-                    body: {
-                      message: toastMessage,
-                      variant: "success",
-                    },
-                  });
-                } catch {
-                  // TUI may not be available
-                }
-              }
-
-              return result;
-            },
-          };
+          return createBrowserOAuthAuthorization(client);
         },
       },
       {

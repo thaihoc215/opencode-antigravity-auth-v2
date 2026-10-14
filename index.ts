@@ -1,7 +1,4 @@
-export {
-  AntigravityCLIOAuthPlugin,
-  GoogleOAuthPlugin,
-} from "./src/plugin";
+export { default } from "./src/v2/plugin";
 
 export {
   authorizeAntigravity,

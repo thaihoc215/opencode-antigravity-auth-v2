@@ -161,9 +161,9 @@ export async function promptLoginMode(existingAccounts: ExistingAccountInfo[]): 
       case "configure-models": {
         const result = await updateOpencodeConfig();
         if (result.success) {
-          console.log(`\n✓ Models configured in ${result.configPath}\n`);
+          console.log(`\n✓ Plugin registered in ${result.configPath}\n`);
         } else {
-          console.log(`\n✗ Failed to configure models: ${result.error}\n`);
+          console.log(`\n✗ Failed to update ${result.configPath}: ${result.error}\n`);
         }
         await pressEnterToContinue();
         continue;

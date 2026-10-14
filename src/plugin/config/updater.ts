@@ -1,7 +1,7 @@
 /**
  * OpenCode configuration file updater.
  *
- * Updates ~/.config/opencode/opencode.json(c) with plugin models.
+ * Registers the plugin in ~/.config/opencode/opencode.json(c) for OpenCode V2.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -19,9 +19,14 @@ export interface UpdateConfigResult {
   error?: string;
 }
 
+/** A V2 `plugins` entry: a package spec or `{ package, options }`. */
+export type PluginEntry = string | { package: string; options?: Record<string, unknown> };
+
 export interface OpencodeConfig {
   $schema?: string;
+  /** OpenCode 1.x plugin list. */
   plugin?: string[];
+  plugins?: PluginEntry[];
   provider?: {
     google?: {
       models?: Record<string, unknown>;
@@ -41,7 +46,8 @@ export interface UpdateConfigOptions {
 // Constants
 // =============================================================================
 
-const PLUGIN_NAME = "opencode-antigravity-auth@latest";
+const PACKAGE_NAME = "opencode-antigravity-auth";
+const PLUGIN_NAME = `${PACKAGE_NAME}@latest`;
 const SCHEMA_URL = "https://opencode.ai/config.json";
 const OPENCODE_JSON_FILENAME = "opencode.json";
 const OPENCODE_JSONC_FILENAME = "opencode.jsonc";
@@ -88,18 +94,29 @@ export function getOpencodeConfigPath(): string {
 // Main Function
 // =============================================================================
 
+function isOurPackage(spec: string): boolean {
+  return spec.includes(PACKAGE_NAME);
+}
+
+function entryPackage(entry: PluginEntry): string {
+  return typeof entry === "string" ? entry : entry.package;
+}
+
 /**
- * Updates the opencode configuration file with plugin models.
+ * Updates the opencode configuration file for this plugin on OpenCode V2.
  *
  * This function:
  * 1. Reads existing opencode.json/opencode.jsonc (or creates default structure)
- * 2. Replaces `provider.google.models` with plugin models
- * 3. Writes back to disk with proper formatting
+ * 2. Ensures `plugins` registers this package, moving a 1.x `plugin` entry
+ *    (and its version) over instead of adding a second copy
+ * 3. Removes copies of the plugin's model definitions from `provider.google.models`;
+ *    the plugin registers its models at runtime on V2
+ * 4. Writes back to disk with proper formatting
  *
  * Preserves:
  * - $schema and other top-level config keys
- * - Non-google provider sections
- * - Other settings within google provider (except models)
+ * - Other plugins, in either list
+ * - Non-google provider sections, google settings, and the user's own google models
  *
  * @param options - Optional configuration (e.g., custom configPath for testing)
  * @returns UpdateConfigResult with success status and path
@@ -117,12 +134,7 @@ export async function updateOpencodeConfig(
       const content = readFileSync(configPath, "utf-8");
       config = JSON.parse(stripJsonCommentsAndTrailingCommas(content)) as OpencodeConfig;
     } else {
-      // Create default config structure
-      config = {
-        $schema: SCHEMA_URL,
-        plugin: [],
-        provider: {},
-      };
+      config = { $schema: SCHEMA_URL };
     }
 
     // Ensure $schema is set
@@ -130,29 +142,34 @@ export async function updateOpencodeConfig(
       config.$schema = SCHEMA_URL;
     }
 
-    // Ensure plugin array exists and contains our plugin
-    if (!Array.isArray(config.plugin)) {
-      config.plugin = [];
+    // Take our entry out of the 1.x list, remembering its version
+    let legacySpec: string | undefined;
+    if (Array.isArray(config.plugin)) {
+      legacySpec = config.plugin.find(isOurPackage);
+      config.plugin = config.plugin.filter((spec) => !isOurPackage(spec));
+      if (config.plugin.length === 0) {
+        delete config.plugin;
+      }
     }
 
-    // Check if plugin is already in the list (any version)
-    const hasPlugin = config.plugin.some((p) =>
-      p.includes("opencode-antigravity-auth")
-    );
-    if (!hasPlugin) {
-      config.plugin.push(PLUGIN_NAME);
+    // Ensure plugins registers our package (any version)
+    if (!Array.isArray(config.plugins)) {
+      config.plugins = [];
+    }
+    if (!config.plugins.some((entry) => isOurPackage(entryPackage(entry)))) {
+      config.plugins.push({ package: legacySpec ?? PLUGIN_NAME });
     }
 
-    // Ensure provider.google structure exists
-    if (!config.provider) {
-      config.provider = {};
+    // Drop copies of our model definitions that the 1.x installer wrote
+    const google = config.provider?.google;
+    if (google?.models) {
+      for (const modelId of Object.keys(OPENCODE_MODEL_DEFINITIONS)) {
+        delete google.models[modelId];
+      }
+      if (Object.keys(google.models).length === 0) {
+        delete google.models;
+      }
     }
-    if (!config.provider.google) {
-      config.provider.google = {};
-    }
-
-    // Replace google models with plugin models
-    config.provider.google.models = { ...OPENCODE_MODEL_DEFINITIONS };
 
     // Ensure config directory exists
     const configDir = dirname(configPath);

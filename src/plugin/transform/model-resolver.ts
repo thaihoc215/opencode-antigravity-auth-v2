@@ -75,7 +75,7 @@ const GEMINI_35_FLASH_HIGH_MODEL = "gemini-3-flash-agent";
  *
  * `defaultLevel` is what an id with no tier suffix resolves to. These are this
  * plugin's choices, not Google's: Google documents `medium` as the default for
- * both generations, while 3.6 resolves to `low` here and 3.7 to `high`.
+ * these generations, while 3.6 resolves to `low` here and 3.7/3.8 to `high`.
  *
  * The Antigravity catalog serves no `-minimal` id for these generations, so a
  * requested `minimal` folds down to `low` — see `normalizeNoMinimalFlashTier`.
@@ -92,6 +92,13 @@ const EFFORT_IN_ID_FLASH_GENERATIONS = [
     // Deliberate deviation from Google's documented `medium`: an untiered 3.7
     // selection gets maximum thinking. That costs more per request than the
     // `low` default every other Gemini entry here uses — chosen knowingly.
+    defaultLevel: "high",
+  },
+  {
+    // Catalog ids gemini-3.8-flash-{low,medium,high}; same default as 3.7.
+    // The catalog also lists `gemini-3.8-flash-tiered`, which is not exposed.
+    regex: /^gemini-3\.8-flash(?:-(minimal|low|medium|high))?$/i,
+    baseModel: "gemini-3.8-flash",
     defaultLevel: "high",
   },
 ] as const;
@@ -201,7 +208,7 @@ export function resolveAntigravityGemini35FlashBackendModel(
 
 /**
  * Resolves the Antigravity backend id for the Flash generations that carry the
- * effort level in the id itself (3.6, 3.7 — see
+ * effort level in the id itself (3.6, 3.7, 3.8 — see
  * `EFFORT_IN_ID_FLASH_GENERATIONS`), or `undefined` for anything else.
  *
  * Already-resolved ids round-trip unchanged, so calling this on the output of a
@@ -335,7 +342,7 @@ export function restoreGeminiMaxOutputTokens(
 /**
  * The thinkingLevel a Gemini 3 model runs at when the request names no tier.
  * `low` for everything except the effort-in-id Flash generations, which carry
- * their own `defaultLevel` — 3.6 Flash `low`, 3.7 Flash `high`.
+ * their own `defaultLevel` — 3.6 Flash `low`, 3.7 and 3.8 Flash `high`.
  */
 function defaultGemini3ThinkingLevel(model: string): string {
   const matched = matchEffortInIdFlash(model);
@@ -346,7 +353,7 @@ function defaultGemini3ThinkingLevel(model: string): string {
 }
 
 /**
- * Gemini 3.6 and 3.7 Flash serve only low/medium/high, while 3.5 Flash also
+ * Gemini 3.6, 3.7 and 3.8 Flash serve only low/medium/high, while 3.5 Flash also
  * serves `minimal`. A `minimal` request against those generations is folded to
  * `low` so that neither the backend id nor the `thinkingLevel` parameter carries
  * a level the backend rejects.
