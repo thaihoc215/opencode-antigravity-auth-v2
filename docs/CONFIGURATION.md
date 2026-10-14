@@ -85,7 +85,6 @@ Settings that control plugin behavior.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `quiet_mode` | `false` | Hide toast notifications |
 | `debug` | `false` | Enable debug logging |
 | `log_dir` | OS default | Custom directory for debug logs |
 | `debug_tui` | `false` | Add the request's debug lines to the model's thinking output and error messages |

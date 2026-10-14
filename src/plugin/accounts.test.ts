@@ -296,31 +296,6 @@ describe("AccountManager", () => {
     expect(snapshot[1]?.expires).toBe(123);
   });
 
-  it("debounces toast display for same account", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date(0));
-
-    const stored: AccountStorageV4 = {
-      version: 4,
-      accounts: [
-        { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
-      ],
-      activeIndex: 0,
-    };
-
-    const manager = new AccountManager(undefined, stored);
-
-    expect(manager.shouldShowAccountToast(0)).toBe(true);
-    manager.markToastShown(0);
-
-    expect(manager.shouldShowAccountToast(0)).toBe(false);
-
-    expect(manager.shouldShowAccountToast(1)).toBe(true);
-
-    vi.setSystemTime(new Date(31000));
-    expect(manager.shouldShowAccountToast(0)).toBe(true);
-  });
-
   describe("header style fallback for Gemini", () => {
     it("tracks rate limits separately for each header style", () => {
       const stored: AccountStorageV4 = {
@@ -1189,7 +1164,10 @@ describe("AccountManager", () => {
 
     it("waits for an in-flight save before persisting a revoked-account removal", async () => {
       const staleSave = deferred<void>();
-      vi.mocked(storageModule.saveAccounts).mockImplementationOnce(async () => staleSave.promise);
+      vi.mocked(storageModule.saveAccounts).mockImplementationOnce(async () => {
+        await staleSave.promise;
+        return stored;
+      });
       vi.mocked(storageModule.removeAccountFromStorage).mockClear();
       const stored: AccountStorageV4 = {
         version: 4,
@@ -2249,5 +2227,80 @@ describe("resolveQuotaGroup", () => {
     // Even if family says claude, model determines the quota group
     expect(resolveQuotaGroup("gemini", "gemini-2.5-flash")).toBe("gemini-flash");
     expect(resolveQuotaGroup("gemini", "gemini-3-pro")).toBe("gemini-pro");
+  });
+});
+
+describe("AccountManager picks up other writers' changes", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.mocked(storageModule.saveAccounts).mockReset();
+  });
+
+  const stored = (): AccountStorageV4 => ({
+    version: 4,
+    accounts: [
+      { email: "a@example.com", refreshToken: "r1", addedAt: 1, lastUsed: 0, enabled: true, statusChangedAt: 100 },
+      { email: "b@example.com", refreshToken: "r2", addedAt: 1, lastUsed: 0, enabled: true },
+    ],
+    activeIndex: 0,
+  });
+
+  it("disables an account the CLI disabled since the pool was loaded", async () => {
+    const manager = new AccountManager(undefined, stored());
+    const onDisk = stored();
+    onDisk.accounts[0] = { ...onDisk.accounts[0]!, enabled: false, statusChangedAt: 200 };
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue(onDisk);
+
+    await manager.saveToDisk();
+
+    expect(manager.getAccounts()[0]?.enabled).toBe(false);
+    expect(manager.getAccountCount()).toBe(1);
+  });
+
+  it("keeps its own newer status change", async () => {
+    const manager = new AccountManager(undefined, stored());
+    manager.setAccountEnabled(0, false);
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue(stored());
+
+    await manager.saveToDisk();
+    await manager.dispose();
+
+    expect(manager.getAccounts()[0]?.enabled).toBe(false);
+  });
+
+  it("stops using an account deleted on disk without renumbering", async () => {
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.saveAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [stored().accounts[1]!],
+      activeIndex: 0,
+      deletedRefreshTokenHashes: [storageModule.hashRefreshToken("r1")],
+    });
+
+    await manager.saveToDisk();
+
+    expect(manager.getAccounts().map((account) => [account.index, account.enabled])).toEqual([
+      [0, false],
+      [1, true],
+    ]);
+  });
+
+  it("retries a failed background save and stops after dispose", async () => {
+    vi.useFakeTimers();
+    const manager = new AccountManager(undefined, stored());
+    vi.mocked(storageModule.saveAccounts)
+      .mockRejectedValueOnce(new Error("ELOCKED"))
+      .mockResolvedValue(stored());
+
+    manager.requestSaveToDisk();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(storageModule.saveAccounts).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(storageModule.saveAccounts).toHaveBeenCalledTimes(2);
+
+    await manager.dispose();
+    manager.requestSaveToDisk();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(storageModule.saveAccounts).toHaveBeenCalledTimes(2);
   });
 });

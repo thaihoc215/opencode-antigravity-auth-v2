@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProactiveRefreshQueue } from "./refresh-queue";
 import { AccountManager } from "./accounts";
 import type { AccountStorageV4 } from "./storage";
-import type { OAuthAuthDetails, PluginClient } from "./types";
+import type { OAuthAuthDetails } from "./types";
 import { refreshAccessToken } from "./token";
 
 vi.mock("./token", () => ({
@@ -10,16 +10,6 @@ vi.mock("./token", () => ({
 }));
 
 const mockedRefresh = vi.mocked(refreshAccessToken);
-
-// Mock PluginClient
-const mockClient: PluginClient = {
-  toast: vi.fn(),
-  auth: {
-    get: vi.fn(),
-    set: vi.fn(),
-    remove: vi.fn(),
-  },
-} as unknown as PluginClient;
 
 describe("ProactiveRefreshQueue", () => {
   beforeEach(() => {
@@ -58,7 +48,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -97,7 +87,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -131,7 +121,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -164,7 +154,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800, // 30 minutes
         checkIntervalSeconds: 300,
@@ -199,7 +189,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -285,7 +275,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,
@@ -335,7 +325,7 @@ describe("ProactiveRefreshQueue", () => {
       };
 
       const manager = new AccountManager(undefined, stored);
-      const queue = new ProactiveRefreshQueue(mockClient, "test-provider", {
+      const queue = new ProactiveRefreshQueue({
         enabled: true,
         bufferSeconds: 1800,
         checkIntervalSeconds: 300,

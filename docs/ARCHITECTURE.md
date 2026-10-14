@@ -1,6 +1,6 @@
 # Architecture Guide
 
-**Last Updated:** April 2026
+**Last Updated:** October 2026
 
 This document explains how the Antigravity plugin works: request/response flow, Claude-specific handling, and error recovery.
 
@@ -25,39 +25,50 @@ The plugin intercepts requests to `generativelanguage.googleapis.com`, transform
 
 ## Module Structure
 
-The plugin has two layers:
+The plugin has three parts:
 
-- **`src/v2/` — OpenCode V2 adapter.** The plugin entry (`{ id, setup(ctx) }`). It registers the provider, models, AI SDK, OAuth method and `google_search` tool through the V2 `ctx` APIs, and maps the V2 credential and connection APIs onto the core's `PluginClient` (`host.ts`). It also ships the account manager CLI (`cli.ts`).
-- **`src/plugin.ts` + `src/plugin/` — host-agnostic core.** Request transformation, account rotation, quota and OAuth. It exposes `auth.loader` (the Antigravity fetch), `auth.login` (interactive CLI login), `models()` and the `google_search` tool, and never imports OpenCode APIs directly.
+- **`src/v2/` — OpenCode V2 adapter.** The plugin entry (`{ id, setup(ctx) }`). It registers the provider, models, AI SDK, OAuth method and `google_search` tool through the V2 `ctx` APIs, reads the active credential (`host.ts`), and rebuilds the core's route when the google credential or the pool changes. The cleanup it returns stops the route and the core.
+- **`src/plugin.ts` + `src/plugin/` — host-agnostic core.** `createAntigravityCore({ directory, options, getAuth, onAccountsRevoked })` returns `loader()` (an `AntigravityRoute`: the Antigravity fetch plus `dispose()`), `models()`, the `google_search` tool and `dispose()`. It never imports OpenCode APIs; the host passes `getAuth` and is told through `onAccountsRevoked` when every pool account's token was revoked. Status messages (rate-limit waits, quota fallbacks) go to the plugin log.
+- **`src/cli/` — account manager CLI.** The interactive menu (`bunx opencode-antigravity-auth`, entry `src/v2/cli.ts`). It edits `antigravity-accounts.json` directly and is never loaded by the server.
 
 ```
 src/
 ├── index.ts                 # Package entry (re-exports src/v2/plugin.ts)
-├── plugin.ts                # Core: fetch interceptor, account rotation, login
-├── constants.ts             # Endpoints, headers, config
+├── plugin.ts                # Core: createAntigravityCore (models, google_search, lifecycle)
+├── constants.ts             # Endpoints, headers, client version
 ├── antigravity/
-│   └── oauth.ts             # OAuth token exchange
+│   └── oauth.ts             # OAuth URL (random state, PKCE) and token exchange
 ├── v2/
 │   ├── plugin.ts            # OpenCode V2 plugin entry
-│   ├── host.ts              # V2 ctx → core PluginClient / credential
+│   ├── host.ts              # V2 ctx → core credential / revoked-account report
 │   ├── models.ts            # Model definitions → V2 Model.Info
 │   ├── actions.ts           # "Action" question of the OAuth form
 │   ├── sdk.ts               # AI SDK factory loaded by OpenCode
-│   └── cli.ts               # Account manager CLI
+│   └── cli.ts               # Account manager CLI entry
+├── cli/
+│   ├── account-manager.ts   # Menu actions: add, re-auth, verify, quotas, delete
+│   ├── prompts.ts           # Menu prompts
+│   ├── opencode-config.ts   # "Register plugin in opencode.json"
+│   └── ui/                  # Terminal menu widgets
 └── plugin/
+    ├── router.ts            # Request routing: account selection, retries, endpoint fallback
+    ├── oauth-flow.ts        # Sign-in shared by the integration and the CLI; writes the pool
+    ├── verification.ts      # Google account verification (403 detection, probe)
     ├── auth.ts              # Token validation & refresh
     ├── request.ts           # Request transformation (main logic)
     ├── request-helpers.ts   # Schema cleaning, thinking filters
     ├── thinking-recovery.ts # Turn boundary detection, crash recovery
     ├── recovery.ts          # Recoverable error classification
     ├── quota.ts             # Quota checking (API usage stats)
-    ├── cache.ts             # Auth & signature caching
+    ├── cache.ts             # Signature caching
     ├── cache/
     │   └── signature-cache.ts # Disk-based signature persistence
     ├── config/
     │   ├── schema.ts        # Zod config schema
     │   └── loader.ts        # Config file loading
-    ├── accounts.ts          # Multi-account management
+    ├── accounts.ts          # Multi-account management (in-memory pool)
+    ├── storage.ts           # antigravity-accounts.json: locking, merging, tombstones
+    ├── paths.ts             # Config directory resolution
     ├── server.ts            # OAuth callback server
     └── debug.ts             # Debug logging
 ```
@@ -66,7 +77,7 @@ src/
 
 ## Request Flow
 
-### 1. Interception (`plugin.ts`)
+### 1. Interception (`plugin/router.ts`)
 
 ```typescript
 fetch() intercepted → isGenerativeLanguageRequest() → prepareAntigravityRequest()
@@ -195,9 +206,16 @@ Claude rejects unsupported JSON Schema features. The plugin uses an **allowlist 
 
 ### Account Storage
 
-Location: `~/.config/opencode/antigravity-accounts.json`
+Location: `~/.config/opencode/antigravity-accounts.json` (the directory follows `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME`; the CLI prints the path it uses)
 
 Contains OAuth refresh tokens - treat as sensitive.
+
+The server and the account manager CLI both write the file. Writes take a file lock and merge with what is on disk:
+
+- Rate-limit state merges per quota key by the time it was set or cleared.
+- Enable/disable and verification state merges by `statusChangedAt`: the later change wins, so a server saving its in-memory pool cannot undo a CLI edit. After each save the server adopts newer status changes and stops using accounts deleted on disk.
+- Deleted accounts are kept as hashed tombstones (`deletedRefreshTokenHashes`), so a stale copy cannot bring them back. "Delete all" and "start fresh" tombstone every replaced account.
+- A file that cannot be read or parsed fails the write instead of being overwritten.
 
 ---
 
@@ -209,7 +227,6 @@ Contains OAuth refresh tokens - treat as sensitive.
 |----------|---------|
 | `OPENCODE_ANTIGRAVITY_DEBUG` | `1` or `2` for file debug logging |
 | `OPENCODE_ANTIGRAVITY_DEBUG_TUI` | `1` or `true` to add the request's debug lines to the thinking output |
-| `OPENCODE_ANTIGRAVITY_QUIET` | Suppress toast notifications |
 
 `debug` and `debug_tui` are independent: `debug` controls file logs, while `debug_tui` adds debug lines to the model's thinking output and error messages.
 

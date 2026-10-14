@@ -26,41 +26,8 @@ export interface ProviderModel {
   [key: string]: unknown;
 }
 
-export interface LoaderResult {
-  apiKey: string;
-  fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
-}
-
-export type ToastVariant = "info" | "warning" | "success" | "error";
-
-/**
- * The host operations the plugin core calls, in the call shapes of the
- * OpenCode V1 SDK client the core was written against. The V2 entrypoint
- * (src/v2/host.ts) implements it on top of the V2 plugin context, and the
- * account CLI implements it for a plain terminal.
- */
-export interface PluginClient {
-  tui: {
-    showToast(options: {
-      body: { title?: string; message: string; variant: ToastVariant; duration?: number };
-    }): Promise<unknown>;
-  };
-  auth: {
-    set(options: {
-      path: { id: string };
-      body: { type: "oauth"; refresh: string; access: string; expires: number };
-    }): Promise<unknown>;
-  };
-}
-
-export interface PluginContext {
-  client: PluginClient;
-  directory: string;
-  /** Plugin options from opencode.json; override antigravity.json settings. */
-  options?: Record<string, unknown>;
-}
-
-export type OAuthAuthorizationResult = { url: string; instructions: string } & (
+/** A started Google sign-in: the URL to open and how it completes. */
+export type OAuthAuthorizationResult = { url: string; instructions: string; expiresAt?: number } & (
   | {
       method: "auto";
       callback: () => Promise<AntigravityTokenExchangeResult>;
@@ -104,16 +71,42 @@ export const GOOGLE_SEARCH_INPUT_SCHEMA = {
   additionalProperties: false,
 } as const satisfies Record<string, unknown>;
 
-export interface PluginResult {
-  auth: {
-    /** Builds the account pool and the Antigravity fetch from the host's credential. */
-    loader: (getAuth: GetAuth) => Promise<LoaderResult | Record<string, unknown>>;
-    /** Interactive terminal login (account manager CLI). */
-    login: (inputs?: Record<string, string>) => Promise<OAuthAuthorizationResult>;
-  };
+export type AntigravityFetch = (input: RequestInfo, init?: RequestInit) => Promise<Response>;
+
+/** The account pool and request routing built from the current credentials. */
+export interface AntigravityRoute {
+  /** Sends a Gemini API request through the Antigravity account pool. */
+  fetch: AntigravityFetch;
+  /** Stops background work (proactive token refresh) and writes pending pool changes. */
+  dispose(): Promise<void>;
+}
+
+export interface AntigravityCoreOptions {
+  /** Project directory, for .opencode/antigravity.json. */
+  directory: string;
+  /** Plugin options from opencode.json; override antigravity.json settings. */
+  options?: Record<string, unknown>;
+  /** Reads the host's current credential for the provider. */
+  getAuth: GetAuth;
+  /**
+   * Called when Google revoked the refresh token of every pool account while
+   * the host's own credential is OAuth: the host should ask for a new sign-in.
+   */
+  onAccountsRevoked?: () => Promise<void>;
+}
+
+export interface AntigravityCore {
+  /**
+   * Builds the account pool from antigravity-accounts.json (seeded from the
+   * host's credential when the file does not exist). `undefined` when there is
+   * neither an OAuth account nor a Gemini API key to route with.
+   */
+  loader(): Promise<AntigravityRoute | undefined>;
   tool: { google_search: CoreTool<GoogleSearchArgs> };
-  /** Static model definitions merged with the models discovered for `auth`. */
-  models: (auth: AuthDetails | undefined) => Promise<Record<string, ProviderModel>>;
+  /** Static model definitions merged with the models discovered for the current credentials. */
+  models(): Promise<Record<string, ProviderModel>>;
+  /** Stops the core's timers and closes its debug log and signature cache. */
+  dispose(): Promise<void>;
 }
 
 export interface RefreshParts {

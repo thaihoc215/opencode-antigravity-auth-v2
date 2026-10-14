@@ -12,10 +12,10 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import type { SignatureCacheConfig } from "../config";
 import { ensureGitignoreSync } from "../storage";
+import { getConfigDir } from "../paths";
 
 // =============================================================================
 // Types
@@ -68,15 +68,6 @@ export interface ThinkingCacheData {
 // =============================================================================
 // Path Utilities
 // =============================================================================
-
-function getConfigDir(): string {
-  const platform = process.platform;
-  if (platform === "win32") {
-    return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "opencode");
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
 
 function getCacheFilePath(): string {
   return join(getConfigDir(), "antigravity-signature-cache.json");
@@ -435,6 +426,10 @@ export class SignatureCache {
     this.cleanupTimer = setInterval(() => {
       this.cleanupExpired();
     }, 30 * 60 * 1000);
+
+    // Background housekeeping must not keep a process (the CLI, a test) alive.
+    this.writeTimer.unref?.();
+    this.cleanupTimer.unref?.();
   }
 
   /**

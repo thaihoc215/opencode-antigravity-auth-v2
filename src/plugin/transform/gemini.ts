@@ -248,15 +248,6 @@ export function isGemini3Model(model: string): boolean {
 }
 
 /**
- * Check if a model is an image generation model.
- * Image models don't support thinking and require imageConfig.
- */
-export function isImageGenerationModel(model: string): boolean {
-  const lower = model.toLowerCase();
-  return lower.includes("image") || lower.includes("imagen");
-}
-
-/**
  * Build Gemini 3 thinking config with thinkingLevel string.
  */
 export function buildGemini3ThinkingConfig(
@@ -282,57 +273,6 @@ export function buildGemini25ThinkingConfig(
       ? { thinkingBudget }
       : {}),
   };
-}
-
-/**
- * Image generation config for Gemini image models.
- *
- * Supported aspect ratios: "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"
- */
-export interface ImageConfig {
-  aspectRatio?: string;
-}
-
-/**
- * Valid aspect ratios for image generation.
- */
-const VALID_ASPECT_RATIOS = [
-  "1:1",
-  "2:3",
-  "3:2",
-  "3:4",
-  "4:3",
-  "4:5",
-  "5:4",
-  "9:16",
-  "16:9",
-  "21:9",
-];
-
-/**
- * Build image generation config for Gemini image models.
- *
- * Configuration is read from environment variables:
- * - OPENCODE_IMAGE_ASPECT_RATIO: Aspect ratio (e.g., "16:9", "4:3")
- *
- * Defaults to 1:1 aspect ratio if not specified.
- *
- * Note: Resolution setting is not currently supported by the Antigravity API.
- */
-export function buildImageGenerationConfig(): ImageConfig {
-  // Read aspect ratio from environment or default to 1:1
-  const aspectRatio = process.env.OPENCODE_IMAGE_ASPECT_RATIO || "1:1";
-
-  if (VALID_ASPECT_RATIOS.includes(aspectRatio)) {
-    return { aspectRatio };
-  }
-
-  console.warn(
-    `[gemini] Invalid aspect ratio "${aspectRatio}". Using default "1:1". Valid values: ${VALID_ASPECT_RATIOS.join(", ")}`,
-  );
-
-  // Default to 1:1 square aspect ratio
-  return { aspectRatio: "1:1" };
 }
 
 /**

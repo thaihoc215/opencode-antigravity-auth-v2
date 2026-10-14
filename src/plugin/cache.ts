@@ -81,8 +81,17 @@ let diskCache: SignatureCache | null = null;
  * Call this from plugin initialization when keep_thinking is enabled.
  */
 export function initDiskSignatureCache(config: SignatureCacheConfig | undefined): SignatureCache | null {
+  diskCache?.shutdown();
   diskCache = createSignatureCache(config);
   return diskCache;
+}
+
+/** Flushes and stops the disk cache if it is still `instance` (another core may have replaced it). */
+export function shutdownDiskSignatureCache(instance: SignatureCache | null): void {
+  if (instance && diskCache === instance) {
+    diskCache.shutdown();
+    diskCache = null;
+  }
 }
 
 /**

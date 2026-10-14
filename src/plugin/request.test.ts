@@ -471,6 +471,43 @@ describe("request.ts", () => {
   });
 
   describe("createStreamingTransformer", () => {
+    /** Streams `chunks` through a transformer and returns the output text. */
+    async function runTransformer(chunks: string[]): Promise<string> {
+      const transformer = createStreamingTransformer(createMockSignatureStore(), defaultCallbacks);
+      const encoder = new TextEncoder();
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      });
+      return new Response(source.pipeThrough(transformer)).text();
+    }
+
+    it("reassembles an SSE line split across many chunks", async () => {
+      const payload = JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "x".repeat(5000) }] } }] } });
+      const line = `data: ${payload}\n\n`;
+      const chunks = line.match(/[\s\S]{1,97}/g)!;
+
+      const output = await runTransformer(chunks);
+
+      const data = output.split("\n").find((entry) => entry.startsWith("data: {\"candidates"));
+      expect(JSON.parse(data!.slice(6)).candidates[0].content.parts[0].text).toHaveLength(5000);
+    });
+
+    it("handles a very long line in small chunks in linear time", async () => {
+      const text = "y".repeat(8 * 1024 * 1024);
+      const line = `data: {"response":{"candidates":[{"content":{"parts":[{"text":"${text}"}]}}]}}\n`;
+      const chunks: string[] = [];
+      for (let i = 0; i < line.length; i += 16 * 1024) chunks.push(line.slice(i, i + 16 * 1024));
+
+      const started = performance.now();
+      const output = await runTransformer(chunks);
+
+      expect(output.length).toBeGreaterThan(text.length);
+      expect(performance.now() - started).toBeLessThan(1500);
+    });
+
     it("returns a TransformStream", () => {
       const store = createMockSignatureStore();
       const transformer = createStreamingTransformer(store, defaultCallbacks);
@@ -1290,30 +1327,6 @@ it("removes API key headers", () => {
         });
       });
 
-      it("transforms gemini-3-flash to gemini-3-flash-preview for gemini-cli headerStyle", () => {
-        const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent",
-          { method: "POST", body: JSON.stringify({ contents: [] }) },
-          mockAccessToken,
-          mockProjectId,
-          undefined,
-          "gemini-cli"
-        );
-        expect(result.effectiveModel).toBe("gemini-3-flash-preview");
-      });
-
-      it("transforms gemini-3-pro-low to gemini-3-pro-preview for gemini-cli headerStyle", () => {
-        const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-low:generateContent",
-          { method: "POST", body: JSON.stringify({ contents: [] }) },
-          mockAccessToken,
-          mockProjectId,
-          undefined,
-          "gemini-cli"
-        );
-        expect(result.effectiveModel).toBe("gemini-3-pro-preview");
-      });
-
       it("transforms gemini-3.1-pro-low to gemini-3.1-pro (bare) for gemini-cli headerStyle", () => {
         const result = prepareAntigravityRequest(
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-low:generateContent",
@@ -1382,6 +1395,41 @@ it("removes API key headers", () => {
   });
 
   describe("transformAntigravityResponse", () => {
+    it("passes Google's retry delay on as Retry-After on a 429", async () => {
+      const response = new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message: "Resource exhausted",
+            details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "12.5s" }],
+          },
+        }),
+        { status: 429, headers: { "content-type": "application/json" } },
+      );
+
+      const transformed = await transformAntigravityResponse(response, false, null, "gemini-3.1-pro");
+
+      expect(transformed.status).toBe(429);
+      expect(transformed.headers.get("Retry-After")).toBe("13");
+      expect(transformed.headers.get("retry-after-ms")).toBe("12500");
+    });
+
+    it("drops content-length and content-encoding of the rewritten body", async () => {
+      const response = new Response(
+        JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "hi" }] } }] } }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json", "content-length": "9999", "content-encoding": "gzip" },
+        },
+      );
+
+      const transformed = await transformAntigravityResponse(response, false, null, "gemini-3.1-pro");
+
+      expect(transformed.headers.get("content-length")).toBeNull();
+      expect(transformed.headers.get("content-encoding")).toBeNull();
+      expect(JSON.parse(await transformed.text()).candidates[0].content.parts[0].text).toBe("hi");
+    });
+
     it("injects [ThinkingResolution] details when debug_tui is enabled", async () => {
       initializeDebug({
         ...DEFAULT_CONFIG,
@@ -1725,12 +1773,6 @@ describe("restoreGeminiMaxOutputTokens", () => {
   it("does not touch Claude models, which have their own thinking-aware path", () => {
     const payload = { generationConfig: { maxOutputTokens: 32000 } };
     restoreGeminiMaxOutputTokens(payload, "claude-sonnet-4-6");
-    expect(payload.generationConfig).toEqual({ maxOutputTokens: 32000 });
-  });
-
-  it("does not touch image models, which report no output limit", () => {
-    const payload = { generationConfig: { maxOutputTokens: 32000 } };
-    restoreGeminiMaxOutputTokens(payload, "gemini-3.1-flash-image");
     expect(payload.generationConfig).toEqual({ maxOutputTokens: 32000 });
   });
 

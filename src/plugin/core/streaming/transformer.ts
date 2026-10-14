@@ -4,7 +4,6 @@ import type {
   StreamingOptions,
   ThoughtBuffer,
 } from './types';
-import { processImageData } from '../../image-saver';
 
 /**
  * Upper bound on the number of thinking-text hashes retained per session.
@@ -30,6 +29,46 @@ function addBoundedThinkingHash(hashes: Set<string>, hash: string): void {
       hashes.delete(oldest);
     }
   }
+}
+
+/**
+ * Shorter thinking text is never treated as a repeat: a chunk like " " or
+ * "Plan" legitimately recurs, and is too short to tell a re-send from a delta.
+ */
+const MIN_DEDUP_THINKING_CHARS = 64;
+
+/**
+ * Deduplicates one thinking part. Streams normally send deltas, which pass
+ * through unchanged. Two kinds of re-send are trimmed:
+ * - a part repeating everything already shown for this position, plus more
+ *   (cumulative text): only the new tail is emitted;
+ * - a substantial block identical to one already shown in this session.
+ * Returns the text to emit, or null to drop the part.
+ */
+function dedupThinkingText(
+  text: string,
+  key: number,
+  sentBuffer: ThoughtBuffer,
+  displayedThinkingHashes?: Set<string>,
+): string | null {
+  const shown = sentBuffer.get(key) ?? '';
+
+  if (shown.length >= MIN_DEDUP_THINKING_CHARS && text.startsWith(shown)) {
+    sentBuffer.set(key, text);
+    const tail = text.slice(shown.length);
+    return tail || null;
+  }
+
+  if (displayedThinkingHashes && text.length >= MIN_DEDUP_THINKING_CHARS) {
+    const hash = hashString(text);
+    if (displayedThinkingHashes.has(hash)) {
+      return null;
+    }
+    addBoundedThinkingHash(displayedThinkingHashes, hash);
+  }
+
+  sentBuffer.set(key, shown + text);
+  return text;
 }
 
 /**
@@ -101,44 +140,16 @@ export function deduplicateThinkingText(
       const newParts = content.parts.map((part: unknown) => {
         const p = part as Record<string, unknown>;
 
-        // Handle image data - save to disk (durable, synchronous) and return file path
-        if (p.inlineData) {
-          const inlineData = p.inlineData as Record<string, unknown>;
-          const result = processImageData({
-            mimeType: inlineData.mimeType as string | undefined,
-            data: inlineData.data as string | undefined,
-          });
-          if (result) {
-            return { text: result };
-          }
-        }
-
-        if (p.thought === true || p.type === 'thinking') {
+if (p.thought === true || p.type === 'thinking') {
           const fullText = (p.text || p.thinking || '') as string;
-          
-          if (displayedThinkingHashes) {
-            const hash = hashString(fullText);
-            if (displayedThinkingHashes.has(hash)) {
-              sentBuffer.set(index, fullText);
-              return null;
-            }
-            addBoundedThinkingHash(displayedThinkingHashes, hash);
+          if (!fullText) {
+            return part;
           }
-
-          const sentText = sentBuffer.get(index) ?? '';
-
-          if (fullText.startsWith(sentText)) {
-            const delta = fullText.slice(sentText.length);
-            sentBuffer.set(index, fullText);
-
-            if (delta) {
-              return { ...p, text: delta, thinking: delta };
-            }
+          const text = dedupThinkingText(fullText, index, sentBuffer, displayedThinkingHashes);
+          if (text === null) {
             return null;
           }
-
-          sentBuffer.set(index, fullText);
-          return part;
+          return text === fullText ? part : { ...p, text, thinking: text };
         }
         return part;
       });
@@ -160,33 +171,15 @@ export function deduplicateThinkingText(
       const b = block as Record<string, unknown> | null;
       if (b?.type === 'thinking') {
         const fullText = (b.thinking || b.text || '') as string;
-        
-        if (displayedThinkingHashes) {
-          const hash = hashString(fullText);
-          if (displayedThinkingHashes.has(hash)) {
-            sentBuffer.set(thinkingIndex, fullText);
-            thinkingIndex++;
-            return null;
-          }
-          addBoundedThinkingHash(displayedThinkingHashes, hash);
+        const key = thinkingIndex++;
+        if (!fullText) {
+          return block;
         }
-
-        const sentText = sentBuffer.get(thinkingIndex) ?? '';
-
-        if (fullText.startsWith(sentText)) {
-          const delta = fullText.slice(sentText.length);
-          sentBuffer.set(thinkingIndex, fullText);
-          thinkingIndex++;
-
-          if (delta) {
-            return { ...b, thinking: delta, text: delta };
-          }
+        const text = dedupThinkingText(fullText, key, sentBuffer, displayedThinkingHashes);
+        if (text === null) {
           return null;
         }
-
-        sentBuffer.set(thinkingIndex, fullText);
-        thinkingIndex++;
-        return block;
+        return text === fullText ? block : { ...b, thinking: text, text };
       }
       return block;
     });
@@ -321,7 +314,9 @@ export function createStreamingTransformer(
 ): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
-  let buffer = '';
+  // Text of the line still being received, in pieces: joining only once the
+  // line ends keeps a long line arriving in many chunks linear, not quadratic.
+  let pending: string[] = [];
   const thoughtBuffer = createThoughtBuffer();
   const sentThinkingBuffer = createThoughtBuffer();
   const debugState = { injected: false };
@@ -329,10 +324,17 @@ export function createStreamingTransformer(
 
   return new TransformStream({
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
+      const text = decoder.decode(chunk, { stream: true });
+      const lastNewline = text.lastIndexOf('\n');
+      if (lastNewline === -1) {
+        if (text) pending.push(text);
+        return;
+      }
 
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      pending.push(text.slice(0, lastNewline));
+      const lines = pending.join('').split('\n');
+      const rest = text.slice(lastNewline + 1);
+      pending = rest ? [rest] : [];
 
       for (const line of lines) {
         // Quick check for usage metadata presence in the raw line
@@ -353,7 +355,9 @@ export function createStreamingTransformer(
       }
     },
     flush(controller) {
-      buffer += decoder.decode();
+      pending.push(decoder.decode());
+      const buffer = pending.join('');
+      pending = [];
 
       if (buffer) {
         if (buffer.includes('usageMetadata')) {

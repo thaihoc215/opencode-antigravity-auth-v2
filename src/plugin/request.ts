@@ -61,9 +61,7 @@ import {
 import { sanitizeCrossModelPayloadInPlace } from "./transform/cross-model-sanitizer";
 import {
   isGemini3Model,
-  isImageGenerationModel,
-  buildImageGenerationConfig,
-  applyGeminiTransforms,
+applyGeminiTransforms,
 } from "./transform";
 import {
   resolveModelForHeaderStyle,
@@ -1005,10 +1003,7 @@ function ensureDefaultGemini3ThinkingLevel(
   effectiveModel: string,
   thinkingLevel?: string,
 ): void {
-  if (
-    !effectiveModel.toLowerCase().includes("gemini-3") ||
-    isImageGenerationModel(effectiveModel)
-  ) {
+  if (!effectiveModel.toLowerCase().includes("gemini-3")) {
     return;
   }
 
@@ -1505,164 +1500,102 @@ export function prepareAntigravityRequest(
         }
 
         // Resolve thinking configuration based on user settings and model capabilities
-        // Image generation models don't support thinking - skip thinking config entirely
-        const isImageModel = isImageGenerationModel(effectiveModel);
-        const userThinkingConfig = isImageModel
-          ? undefined
-          : extractThinkingConfig(
-              requestPayload,
-              rawGenerationConfig,
-              extraBody,
-            );
+        const userThinkingConfig = extractThinkingConfig(
+          requestPayload,
+          rawGenerationConfig,
+          extraBody,
+        );
         // Claude Sonnet 4.6 is non-thinking only.
         // Ignore any client-provided thinkingConfig for this model.
         const lowerEffective = effectiveModel.toLowerCase();
         const isClaudeSonnetNonThinking =
           lowerEffective === "claude-sonnet-4-6";
-        const effectiveUserThinkingConfig =
-          isClaudeSonnetNonThinking || isImageModel
-            ? undefined
-            : userThinkingConfig;
+        const effectiveUserThinkingConfig = isClaudeSonnetNonThinking
+          ? undefined
+          : userThinkingConfig;
 
-        // For image models, add imageConfig instead of thinkingConfig
-        if (isImageModel) {
-          const imageConfig = buildImageGenerationConfig();
-          const generationConfig = (rawGenerationConfig ?? {}) as Record<
-            string,
-            unknown
-          >;
-          generationConfig.imageConfig = imageConfig;
-          // Remove any thinkingConfig that might have been set
-          delete generationConfig.thinkingConfig;
-          // Set reasonable defaults for image generation
-          if (!generationConfig.candidateCount) {
-            generationConfig.candidateCount = 1;
+        const finalThinkingConfig = resolveThinkingConfig(
+          effectiveUserThinkingConfig,
+          isClaudeSonnetNonThinking
+            ? false
+            : (resolved.isThinkingModel ??
+                isThinkingCapableModel(effectiveModel)),
+        );
+
+        const normalizedThinking =
+          normalizeThinkingConfig(finalThinkingConfig);
+        if (normalizedThinking) {
+          // Use tier-based thinking budget if specified via model suffix, otherwise fall back to user config
+          const thinkingBudget =
+            tierThinkingBudget ?? normalizedThinking.thinkingBudget;
+
+          // Build thinking config based on model type
+          let thinkingConfig: Record<string, unknown>;
+
+          if (isClaudeThinking) {
+            // Claude uses snake_case keys
+            thinkingConfig = {
+              include_thoughts: normalizedThinking.includeThoughts ?? true,
+              ...(typeof thinkingBudget === "number" && thinkingBudget > 0
+                ? { thinking_budget: thinkingBudget }
+                : {}),
+            };
+          } else if (tierThinkingLevel) {
+            // Gemini 3 uses thinkingLevel string (low/medium/high)
+            thinkingConfig = {
+              includeThoughts: normalizedThinking.includeThoughts,
+              thinkingLevel: tierThinkingLevel,
+            };
+          } else {
+            // Gemini 2.5 and others use numeric budget
+            thinkingConfig = {
+              includeThoughts: normalizedThinking.includeThoughts,
+              ...(typeof thinkingBudget === "number" && thinkingBudget > 0
+                ? { thinkingBudget }
+                : {}),
+            };
           }
-          requestPayload.generationConfig = generationConfig;
 
-          // Add safety settings for image generation (permissive to allow creative content)
-          if (!requestPayload.safetySettings) {
-            requestPayload.safetySettings = [
-              {
-                category: "HARM_CATEGORY_HARASSMENT",
-                threshold: "BLOCK_ONLY_HIGH",
-              },
-              {
-                category: "HARM_CATEGORY_HATE_SPEECH",
-                threshold: "BLOCK_ONLY_HIGH",
-              },
-              {
-                category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                threshold: "BLOCK_ONLY_HIGH",
-              },
-              {
-                category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-                threshold: "BLOCK_ONLY_HIGH",
-              },
-              {
-                category: "HARM_CATEGORY_CIVIC_INTEGRITY",
-                threshold: "BLOCK_ONLY_HIGH",
-              },
-            ];
-          }
+          if (rawGenerationConfig) {
+            rawGenerationConfig.thinkingConfig = thinkingConfig;
 
-          // Image models don't support tools - remove them entirely
-          delete requestPayload.tools;
-          delete requestPayload.toolConfig;
-
-          // Replace system instruction with a simple image generation prompt
-          // Image models should not receive agentic coding assistant instructions
-          requestPayload.systemInstruction = {
-            parts: [
-              {
-                text: "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.",
-              },
-            ],
-          };
-        } else {
-          const finalThinkingConfig = resolveThinkingConfig(
-            effectiveUserThinkingConfig,
-            isClaudeSonnetNonThinking
-              ? false
-              : (resolved.isThinkingModel ??
-                  isThinkingCapableModel(effectiveModel)),
-          );
-
-          const normalizedThinking =
-            normalizeThinkingConfig(finalThinkingConfig);
-          if (normalizedThinking) {
-            // Use tier-based thinking budget if specified via model suffix, otherwise fall back to user config
-            const thinkingBudget =
-              tierThinkingBudget ?? normalizedThinking.thinkingBudget;
-
-            // Build thinking config based on model type
-            let thinkingConfig: Record<string, unknown>;
-
-            if (isClaudeThinking) {
-              // Claude uses snake_case keys
-              thinkingConfig = {
-                include_thoughts: normalizedThinking.includeThoughts ?? true,
-                ...(typeof thinkingBudget === "number" && thinkingBudget > 0
-                  ? { thinking_budget: thinkingBudget }
-                  : {}),
-              };
-            } else if (tierThinkingLevel) {
-              // Gemini 3 uses thinkingLevel string (low/medium/high)
-              thinkingConfig = {
-                includeThoughts: normalizedThinking.includeThoughts,
-                thinkingLevel: tierThinkingLevel,
-              };
-            } else {
-              // Gemini 2.5 and others use numeric budget
-              thinkingConfig = {
-                includeThoughts: normalizedThinking.includeThoughts,
-                ...(typeof thinkingBudget === "number" && thinkingBudget > 0
-                  ? { thinkingBudget }
-                  : {}),
-              };
-            }
-
-            if (rawGenerationConfig) {
-              rawGenerationConfig.thinkingConfig = thinkingConfig;
-
-              if (
-                isClaudeThinking &&
-                typeof thinkingBudget === "number" &&
-                thinkingBudget > 0
-              ) {
-                const currentMax = (rawGenerationConfig.maxOutputTokens ??
-                  rawGenerationConfig.max_output_tokens) as number | undefined;
-                if (!currentMax || currentMax <= thinkingBudget) {
-                  rawGenerationConfig.maxOutputTokens =
-                    CLAUDE_THINKING_MAX_OUTPUT_TOKENS;
-                  if (rawGenerationConfig.max_output_tokens !== undefined) {
-                    delete rawGenerationConfig.max_output_tokens;
-                  }
+            if (
+              isClaudeThinking &&
+              typeof thinkingBudget === "number" &&
+              thinkingBudget > 0
+            ) {
+              const currentMax = (rawGenerationConfig.maxOutputTokens ??
+                rawGenerationConfig.max_output_tokens) as number | undefined;
+              if (!currentMax || currentMax <= thinkingBudget) {
+                rawGenerationConfig.maxOutputTokens =
+                  CLAUDE_THINKING_MAX_OUTPUT_TOKENS;
+                if (rawGenerationConfig.max_output_tokens !== undefined) {
+                  delete rawGenerationConfig.max_output_tokens;
                 }
               }
-
-              requestPayload.generationConfig = rawGenerationConfig;
-            } else {
-              const generationConfig: Record<string, unknown> = {
-                thinkingConfig,
-              };
-
-              if (
-                isClaudeThinking &&
-                typeof thinkingBudget === "number" &&
-                thinkingBudget > 0
-              ) {
-                generationConfig.maxOutputTokens =
-                  CLAUDE_THINKING_MAX_OUTPUT_TOKENS;
-              }
-
-              requestPayload.generationConfig = generationConfig;
             }
-          } else if (rawGenerationConfig?.thinkingConfig) {
-            delete rawGenerationConfig.thinkingConfig;
+
             requestPayload.generationConfig = rawGenerationConfig;
+          } else {
+            const generationConfig: Record<string, unknown> = {
+              thinkingConfig,
+            };
+
+            if (
+              isClaudeThinking &&
+              typeof thinkingBudget === "number" &&
+              thinkingBudget > 0
+            ) {
+              generationConfig.maxOutputTokens =
+                CLAUDE_THINKING_MAX_OUTPUT_TOKENS;
+            }
+
+            requestPayload.generationConfig = generationConfig;
           }
-        } // End of else block for non-image models
+        } else if (rawGenerationConfig?.thinkingConfig) {
+          delete rawGenerationConfig.thinkingConfig;
+          requestPayload.generationConfig = rawGenerationConfig;
+        }
 
         // Clean up thinking fields from extra_body
         if (extraBody) {
@@ -2349,6 +2282,19 @@ export function buildThinkingWarmupBody(
 }
 
 /**
+ * Headers for a response whose body this plugin rewrites. fetch() already
+ * decoded the body, and the rewrite changes its length, so the upstream
+ * content-encoding and content-length no longer describe it.
+ */
+function rewrittenResponseHeaders(response: Response): Headers {
+  const headers = new Headers(response.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  headers.delete("transfer-encoding");
+  return headers;
+}
+
+/**
  * Normalizes Antigravity responses: applies retry headers, extracts cache usage into headers,
  * rewrites preview errors, flattens streaming payloads, and logs debug metadata.
  *
@@ -2396,7 +2342,7 @@ export async function transformAntigravityResponse(
   // while maintaining real-time streaming (no buffering of entire response).
   // This enables thinking tokens to be displayed as they arrive, like the Codex plugin.
   if (streaming && response.ok && isEventStreamResponse && response.body) {
-    const headers = new Headers(response.headers);
+    const headers = rewrittenResponseHeaders(response);
 
     logAntigravityDebugResponse(debugContext, response, {
       note: "Streaming SSE response (real-time transform)",
@@ -2431,7 +2377,7 @@ export async function transformAntigravityResponse(
   const responseFallback = response.clone();
 
   try {
-    const headers = new Headers(response.headers);
+    const headers = rewrittenResponseHeaders(response);
     const text = await response.text();
 
     if (!response.ok) {
@@ -2442,6 +2388,25 @@ export async function transformAntigravityResponse(
         errorBody = JSON.parse(text);
       } catch {
         errorBody = { error: { message: text } };
+      }
+
+      // Pass Google's retry delay on as Retry-After, so the SDK waits as long as asked.
+      if (errorBody?.error?.details && Array.isArray(errorBody.error.details)) {
+        const retryInfo = errorBody.error.details.find(
+          (detail) =>
+            detail["@type"] === "type.googleapis.com/google.rpc.RetryInfo",
+        );
+
+        if (typeof retryInfo?.retryDelay === "string") {
+          const match = retryInfo.retryDelay.match(/^([\d.]+)s$/);
+          if (match && match[1]) {
+            const retrySeconds = parseFloat(match[1]);
+            if (!isNaN(retrySeconds) && retrySeconds > 0) {
+              headers.set("Retry-After", Math.ceil(retrySeconds).toString());
+              headers.set("retry-after-ms", Math.ceil(retrySeconds * 1000).toString());
+            }
+          }
+        }
       }
 
       // Inject Debug Info
@@ -2491,26 +2456,6 @@ export async function transformAntigravityResponse(
           statusText: response.statusText,
           headers,
         });
-      }
-
-      if (errorBody?.error?.details && Array.isArray(errorBody.error.details)) {
-        const retryInfo = errorBody.error.details.find(
-          (detail) =>
-            detail["@type"] === "type.googleapis.com/google.rpc.RetryInfo",
-        );
-
-        if (typeof retryInfo?.retryDelay === "string") {
-          const match = retryInfo.retryDelay.match(/^([\d.]+)s$/);
-          if (match && match[1]) {
-            const retrySeconds = parseFloat(match[1]);
-            if (!isNaN(retrySeconds) && retrySeconds > 0) {
-              const retryAfterSec = Math.ceil(retrySeconds).toString();
-              const retryAfterMs = Math.ceil(retrySeconds * 1000).toString();
-              headers.set("Retry-After", retryAfterSec);
-              headers.set("retry-after-ms", retryAfterMs);
-            }
-          }
-        }
       }
     }
 

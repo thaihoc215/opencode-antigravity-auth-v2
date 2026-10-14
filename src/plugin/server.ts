@@ -5,6 +5,12 @@ import { ANTIGRAVITY_REDIRECT_URI } from "../constants";
 
 interface OAuthListenerOptions {
   /**
+   * The `state` the sign-in sent. Only a redirect carrying it completes the
+   * sign-in; any other request to the callback path is answered with an error
+   * page and ignored.
+   */
+  expectedState: string;
+  /**
    * How long to wait for the OAuth redirect before timing out (in milliseconds).
    */
   timeoutMs?: number;
@@ -138,7 +144,7 @@ function getBindAddress(): string {
  * and resolves with the captured callback URL.
  */
 export async function startOAuthListener(
-  { timeoutMs = 5 * 60 * 1000 }: OAuthListenerOptions = {},
+  { expectedState, timeoutMs = 5 * 60 * 1000 }: OAuthListenerOptions,
 ): Promise<OAuthListener> {
   const port = redirectUri.port
     ? Number.parseInt(redirectUri.port, 10)
@@ -308,6 +314,16 @@ const successResponse = `<!DOCTYPE html>
     if (url.pathname !== callbackPath) {
       response.writeHead(404, { "Content-Type": "text/plain" });
       response.end("Not found");
+      return;
+    }
+
+    if (url.searchParams.get("state") !== expectedState) {
+      response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+      response.end(
+        "This redirect does not belong to the sign-in this window is waiting for.\n\n" +
+          "If another sign-in is asking for the authorization code, copy this page's full URL " +
+          "from the address bar and paste it there. Otherwise start the sign-in again.",
+      );
       return;
     }
 

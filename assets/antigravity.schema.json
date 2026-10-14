@@ -5,11 +5,6 @@
     "$schema": {
       "type": "string"
     },
-    "quiet_mode": {
-      "default": false,
-      "type": "boolean",
-      "description": "Suppress most toast notifications (rate limit, account switching)."
-    },
     "debug": {
       "default": false,
       "type": "boolean",
@@ -21,7 +16,7 @@
     },
     "log_dir": {
       "type": "string",
-      "description": "Custom directory for debug logs."
+      "description": "Custom directory for debug logs. Ignored in a project's .opencode/antigravity.json."
     },
     "keep_thinking": {
       "default": false,

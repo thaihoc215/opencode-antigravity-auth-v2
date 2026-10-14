@@ -2,7 +2,7 @@ import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET } from "../constants";
 import { formatRefreshParts, parseRefreshParts, calculateTokenExpiry } from "./auth";
 import { createLogger } from "./logger";
 import { invalidateProjectContextCache } from "./project";
-import type { OAuthAuthDetails, PluginClient, RefreshParts } from "./types";
+import type { OAuthAuthDetails, RefreshParts } from "./types";
 
 const log = createLogger("token");
 
@@ -78,23 +78,45 @@ export class AntigravityTokenRefreshError extends Error {
   }
 }
 
+/** Google's token endpoint normally answers in well under a second. */
+const TOKEN_REFRESH_TIMEOUT_MS = 15_000;
+
+/** Refreshes in flight, by refresh token, so concurrent callers share one request. */
+const inflightRefreshes = new Map<string, Promise<OAuthAuthDetails | undefined>>();
+
 /**
- * Refreshes an Antigravity OAuth access token, updates persisted credentials, and handles revocation.
+ * Refreshes an Antigravity OAuth access token and reports revocation
+ * (`invalid_grant`) as an AntigravityTokenRefreshError. Concurrent calls for
+ * the same refresh token share one request to Google.
  */
-export async function refreshAccessToken(
-  auth: OAuthAuthDetails,
-  client: PluginClient,
-  providerId: string,
-): Promise<OAuthAuthDetails | undefined> {
+export async function refreshAccessToken(auth: OAuthAuthDetails): Promise<OAuthAuthDetails | undefined> {
   const parts = parseRefreshParts(auth.refresh);
   if (!parts.refreshToken) {
     return undefined;
   }
 
+  const inflight = inflightRefreshes.get(parts.refreshToken);
+  if (inflight) {
+    const refreshed = await inflight;
+    // Same token, so the result applies; keep the caller's other fields.
+    return refreshed ? { ...auth, access: refreshed.access, expires: refreshed.expires, refresh: refreshed.refresh } : undefined;
+  }
+
+  const request = requestAccessToken(auth, parts);
+  inflightRefreshes.set(parts.refreshToken, request);
+  try {
+    return await request;
+  } finally {
+    inflightRefreshes.delete(parts.refreshToken);
+  }
+}
+
+async function requestAccessToken(auth: OAuthAuthDetails, parts: RefreshParts): Promise<OAuthAuthDetails | undefined> {
   try {
     const startTime = Date.now();
     const response = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
+      signal: AbortSignal.timeout(TOKEN_REFRESH_TIMEOUT_MS),
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },

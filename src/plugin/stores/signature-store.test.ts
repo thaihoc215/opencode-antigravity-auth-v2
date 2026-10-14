@@ -147,3 +147,19 @@ describe("defaultSignatureStore", () => {
     expect(imported).toBe(defaultSignatureStore);
   });
 });
+
+describe("createSignatureStore size limit", () => {
+  const thinking = (text: string) => ({ text, signature: `sig-${text}` });
+
+  it("drops the least recently used session beyond the limit", () => {
+    const store = createSignatureStore(2);
+    store.set("a", thinking("a"));
+    store.set("b", thinking("b"));
+    store.get("a");
+    store.set("c", thinking("c"));
+
+    expect(store.has("a")).toBe(true);
+    expect(store.has("b")).toBe(false);
+    expect(store.has("c")).toBe(true);
+  });
+});

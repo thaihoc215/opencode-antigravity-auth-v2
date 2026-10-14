@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
  * network-failure path correctly uses it.
  */
 
-// Reset module state between tests so versionLocked starts fresh
+// Reset module state between tests so each starts from the fallback version
 beforeEach(() => {
   vi.resetModules()
 })
@@ -50,17 +50,18 @@ describe("ANTIGRAVITY_VERSION_FALLBACK", () => {
 })
 
 describe("setAntigravityVersion", () => {
-  it("updates the version on first call", async () => {
+  it("moves to a newer version, so a long-running server picks up releases", async () => {
     const { getAntigravityVersion, setAntigravityVersion } = await import("../constants.ts")
-    setAntigravityVersion("2.0.0")
-    expect(getAntigravityVersion()).toBe("2.0.0")
+    setAntigravityVersion("90.0.0")
+    expect(getAntigravityVersion()).toBe("90.0.0")
+    setAntigravityVersion("91.0.0")
+    expect(getAntigravityVersion()).toBe("91.0.0")
   })
 
-  it("locks after first call — subsequent calls are ignored", async () => {
-    const { getAntigravityVersion, setAntigravityVersion } = await import("../constants.ts")
-    setAntigravityVersion("2.0.0")
-    setAntigravityVersion("3.0.0")
-    expect(getAntigravityVersion()).toBe("2.0.0")
+  it("ignores an older version", async () => {
+    const { ANTIGRAVITY_VERSION_FALLBACK, getAntigravityVersion, setAntigravityVersion } = await import("../constants.ts")
+    setAntigravityVersion("1.0.0")
+    expect(getAntigravityVersion()).toBe(ANTIGRAVITY_VERSION_FALLBACK)
   })
 })
 

@@ -6,23 +6,23 @@ interface ModelTest {
   category: "gemini-cli" | "antigravity-gemini" | "antigravity-claude";
 }
 
+// Variants are selected with `#variant` on OpenCode V2.
 const MODELS: ModelTest[] = [
-  // Gemini CLI (direct Google API)
-  { model: "google/gemini-3-flash-preview", category: "gemini-cli" },
-  { model: "google/gemini-3-pro-preview", category: "gemini-cli" },
-  { model: "google/gemini-2.5-pro", category: "gemini-cli" },
-  { model: "google/gemini-2.5-flash", category: "gemini-cli" },
+  // Gemini CLI quota
+  { model: "google/gemini-3.8-flash", category: "gemini-cli" },
+  { model: "google/gemini-3.1-pro", category: "gemini-cli" },
 
   // Antigravity Gemini
-  { model: "google/antigravity-gemini-3-pro-low", category: "antigravity-gemini" },
-  { model: "google/antigravity-gemini-3-pro-high", category: "antigravity-gemini" },
-  { model: "google/antigravity-gemini-3-flash", category: "antigravity-gemini" },
+  { model: "google/antigravity-gemini-3.1-pro#low", category: "antigravity-gemini" },
+  { model: "google/antigravity-gemini-3.1-pro#high", category: "antigravity-gemini" },
+  { model: "google/antigravity-gemini-3.8-flash#low", category: "antigravity-gemini" },
+  { model: "google/antigravity-gemini-3.8-flash", category: "antigravity-gemini" },
 
   // Antigravity Claude
   { model: "google/antigravity-claude-sonnet-4-6", category: "antigravity-claude" },
-  { model: "google/antigravity-claude-opus-4-6-thinking-low", category: "antigravity-claude" },
-  { model: "google/antigravity-claude-opus-4-6-thinking-medium", category: "antigravity-claude" },
-  { model: "google/antigravity-claude-opus-4-6-thinking-high", category: "antigravity-claude" },
+  { model: "google/antigravity-claude-opus-4-6-thinking#low", category: "antigravity-claude" },
+  { model: "google/antigravity-claude-opus-4-6-thinking#medium", category: "antigravity-claude" },
+  { model: "google/antigravity-claude-opus-4-6-thinking#high", category: "antigravity-claude" },
 ];
 
 const TEST_PROMPT = "Reply with exactly one word: WORKING";
@@ -101,7 +101,7 @@ Options:
 
 Examples:
   npx tsx script/test-models.ts --dry-run
-  npx tsx script/test-models.ts --model google/gemini-3-flash-preview
+  npx tsx script/test-models.ts --model google/antigravity-gemini-3.8-flash#low
   npx tsx script/test-models.ts --category antigravity-claude
 `);
 }

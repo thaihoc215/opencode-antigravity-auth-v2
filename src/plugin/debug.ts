@@ -1,7 +1,6 @@
 import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { env } from "node:process";
-import { homedir } from "node:os";
 import type { AntigravityConfig } from "./config";
 import {
   deriveDebugPolicy,
@@ -13,6 +12,7 @@ import {
   truncateTextForLog,
 } from "./logging-utils";
 import { ensureGitignoreSync } from "./storage";
+import { getConfigDir } from "./paths";
 
 const MAX_BODY_PREVIEW_CHARS = 12000;
 const MAX_BODY_LOG_CHARS = 50000;
@@ -28,21 +28,10 @@ interface DebugState {
   debugTuiEnabled: boolean;
   logFilePath: string | undefined;
   logWriter: (line: string) => void;
+  closeLog: () => void;
 }
 
 let debugState: DebugState | null = null;
-
-/**
- * Get the OS-specific config directory.
- */
-function getConfigDir(): string {
-  const platform = process.platform;
-  if (platform === "win32") {
-    return join(env.APPDATA || join(homedir(), "AppData", "Roaming"), "opencode");
-  }
-  const xdgConfig = env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
 
 /**
  * Returns the logs directory, creating it if needed.
@@ -104,22 +93,37 @@ function cleanupOldLogs(logsDir: string, maxFiles: number): void {
 /**
  * Creates a log writer function that writes to a file.
  */
-function createLogWriter(filePath?: string): (line: string) => void {
+function createLogWriter(filePath?: string): Pick<DebugState, "logWriter" | "closeLog"> {
+  const none = { logWriter: () => {}, closeLog: () => {} };
   if (!filePath) {
-    return () => {};
+    return none;
   }
 
   try {
     const stream = createWriteStream(filePath, { flags: "a" });
     stream.on("error", () => {});
-    return (line: string) => {
-      const timestamp = new Date().toISOString();
-      const formatted = `[${timestamp}] ${line}`;
-      stream.write(`${formatted}\n`);
+    return {
+      logWriter: (line: string) => {
+        const timestamp = new Date().toISOString();
+        stream.write(`[${timestamp}] ${line}\n`);
+      },
+      closeLog: () => stream.end(),
     };
   } catch {
-    return () => {};
+    return none;
   }
+}
+
+/** Closes the debug log file, if one is open. Logging is off until the next initializeDebug. */
+export function shutdownDebug(): void {
+  debugState?.closeLog();
+  debugState = {
+    debugEnabled: false,
+    debugTuiEnabled: false,
+    logFilePath: undefined,
+    logWriter: () => {},
+    closeLog: () => {},
+  };
 }
 
 /**
@@ -137,17 +141,17 @@ export function initializeDebug(config: AntigravityConfig): void {
   });
   const debugTuiEnabled = config.debug_tui || isTruthyFlag(env.OPENCODE_ANTIGRAVITY_DEBUG_TUI);
   const logFilePath = debugEnabled ? createLogFilePath(config.log_dir) : undefined;
-  const logWriter = createLogWriter(logFilePath);
 
   if (debugEnabled) {
     ensureGitignoreSync(getConfigDir());
   }
 
+  debugState?.closeLog();
   debugState = {
     debugEnabled,
     debugTuiEnabled,
     logFilePath,
-    logWriter,
+    ...createLogWriter(logFilePath),
   };
 }
 
@@ -166,13 +170,12 @@ function getDebugState(): DebugState {
     });
     const debugTuiEnabled = isTruthyFlag(env.OPENCODE_ANTIGRAVITY_DEBUG_TUI);
     const logFilePath = debugEnabled ? createLogFilePath() : undefined;
-    const logWriter = createLogWriter(logFilePath);
 
     debugState = {
       debugEnabled,
       debugTuiEnabled,
       logFilePath,
-      logWriter,
+      ...createLogWriter(logFilePath),
     };
   }
   return debugState;

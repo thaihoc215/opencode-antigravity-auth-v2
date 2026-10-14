@@ -81,18 +81,29 @@ export const ANTIGRAVITY_DEFAULT_PROJECT_ID = "rising-fact-p41fc";
  */
 export const ANTIGRAVITY_VERSION_FALLBACK = "2.8.1";
 let antigravityVersion = ANTIGRAVITY_VERSION_FALLBACK;
-let versionLocked = false;
 
 export function getAntigravityVersion(): string { return antigravityVersion; }
 
 /**
- * Set the runtime Antigravity version. Can only be called once (at startup).
- * Subsequent calls are silently ignored to prevent accidental mutation.
+ * Set the runtime Antigravity version. Only moves forward: a lower version is
+ * ignored, so a stale answer from one of the version sources cannot downgrade
+ * the version a long-running server reports.
  */
 export function setAntigravityVersion(version: string): void {
-  if (versionLocked) return;
-  antigravityVersion = version;
-  versionLocked = true;
+  if (compareVersions(version, antigravityVersion) > 0) {
+    antigravityVersion = version;
+  }
+}
+
+/** Numeric semver compare: negative if a < b, positive if a > b, 0 if equal. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 export function getAntigravityHeaders(): HeaderSet & { "Client-Metadata": string } {

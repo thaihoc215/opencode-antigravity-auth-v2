@@ -10,31 +10,15 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { AntigravityConfigSchema, DEFAULT_CONFIG, type AntigravityConfig } from "./schema";
 import { createLogger } from "../logger";
+import { getConfigDir } from "../paths";
 
 const log = createLogger("config");
 
 // =============================================================================
 // Path Utilities
 // =============================================================================
-
-/**
- * Get the config directory path, with the following precedence:
- * 1. OPENCODE_CONFIG_DIR env var (if set)
- * 2. ~/.config/opencode (all platforms, including Windows)
- */
-function getConfigDir(): string {
-  // 1. Check for explicit override via env var
-  if (process.env.OPENCODE_CONFIG_DIR) {
-    return process.env.OPENCODE_CONFIG_DIR;
-  }
-
-  // 2. Use ~/.config/opencode on all platforms (including Windows)
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(xdgConfig, "opencode");
-}
 
 /**
  * Get the user-level config file path.
@@ -94,6 +78,29 @@ function parsePartialConfig(rawConfig: unknown, source: string): Partial<Antigra
 }
 
 /**
+ * Options a repository's .opencode/antigravity.json may not set: debug logs
+ * contain prompts and responses, so only the user decides whether and where
+ * they are written.
+ */
+const USER_ONLY_OPTIONS = ["debug", "debug_tui", "log_dir"] as const;
+
+function withoutUserOnlyOptions(
+  config: Partial<AntigravityConfig>,
+  path: string,
+): Partial<AntigravityConfig> {
+  const ignored = USER_ONLY_OPTIONS.filter((key) => config[key] !== undefined);
+  if (ignored.length === 0) {
+    return config;
+  }
+  log.warn("Ignoring options that only the user config may set", { path, ignored: ignored.join(", ") });
+  const copy = { ...config };
+  for (const key of ignored) {
+    delete copy[key];
+  }
+  return copy;
+}
+
+/**
  * Deep merge two config objects, with override taking precedence.
  */
 function mergeConfigs(
@@ -139,7 +146,7 @@ export function loadConfig(directory: string, options?: Record<string, unknown>)
   const projectConfigPath = getProjectConfigPath(directory);
   const projectConfig = loadConfigFile(projectConfigPath);
   if (projectConfig) {
-    config = mergeConfigs(config, projectConfig);
+    config = mergeConfigs(config, withoutUserOnlyOptions(projectConfig, projectConfigPath));
   }
 
   // Plugin options from the OpenCode config override both files

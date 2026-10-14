@@ -17,12 +17,10 @@ const rawSchema = AntigravityConfigSchema.toJSONSchema({
 delete rawSchema.required;
 
 const optionDescriptions: Record<string, string> = {
-  quiet_mode:
-    "Suppress most toast notifications (rate limit, account switching).",
   debug:
     "Enable debug logging to file.",
   log_dir:
-    "Custom directory for debug logs.",
+    "Custom directory for debug logs. Ignored in a project's .opencode/antigravity.json.",
   keep_thinking:
     "Preserve thinking blocks for Claude models using signature caching. May cause signature errors.",
   empty_response_max_attempts:

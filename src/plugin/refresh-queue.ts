@@ -17,7 +17,7 @@
  */
 
 import type { AccountManager, ManagedAccount } from "./accounts";
-import type { PluginClient, OAuthAuthDetails } from "./types";
+import type { OAuthAuthDetails } from "./types";
 import { refreshAccessToken } from "./token";
 import { createLogger } from "./logger";
 
@@ -80,8 +80,6 @@ interface RefreshQueueState {
  */
 export class ProactiveRefreshQueue {
   private readonly config: ProactiveRefreshConfig;
-  private readonly client: PluginClient;
-  private readonly providerId: string;
   private accountManager: AccountManager | null = null;
 
   /**
@@ -100,13 +98,9 @@ export class ProactiveRefreshQueue {
     errorCount: 0,
   };
 
-  constructor(
-    client: PluginClient,
-    providerId: string,
-    config?: Partial<ProactiveRefreshConfig>,
-  ) {
-    this.client = client;
-    this.providerId = providerId;
+  private initialCheck: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(config?: Partial<ProactiveRefreshConfig>) {
     this.config = {
       ...DEFAULT_PROACTIVE_REFRESH_CONFIG,
       ...config,
@@ -352,7 +346,7 @@ export class ProactiveRefreshQueue {
       minutesUntilExpiry,
     });
 
-    return refreshAccessToken(auth, this.client, this.providerId);
+    return refreshAccessToken(auth);
   }
 
   /**
@@ -377,7 +371,8 @@ export class ProactiveRefreshQueue {
     });
 
     // Run initial check after a short delay (let things settle)
-    setTimeout(() => {
+    this.initialCheck = setTimeout(() => {
+      this.initialCheck = null;
       if (this.state.isRunning) {
         this.runRefreshCheck().catch((error) => {
           log.error("Initial check failed", {
@@ -386,6 +381,7 @@ export class ProactiveRefreshQueue {
         });
       }
     }, 5000);
+    this.initialCheck.unref?.();
 
     // Set up periodic checks
     this.state.intervalHandle = setInterval(() => {
@@ -395,6 +391,7 @@ export class ProactiveRefreshQueue {
         });
       });
     }, intervalMs);
+    this.state.intervalHandle.unref?.();
   }
 
   /**
@@ -407,6 +404,10 @@ export class ProactiveRefreshQueue {
 
     this.state.isRunning = false;
 
+    if (this.initialCheck) {
+      clearTimeout(this.initialCheck);
+      this.initialCheck = null;
+    }
     if (this.state.intervalHandle) {
       clearInterval(this.state.intervalHandle);
       this.state.intervalHandle = null;
@@ -443,10 +444,6 @@ export class ProactiveRefreshQueue {
 /**
  * Create a proactive refresh queue instance.
  */
-export function createProactiveRefreshQueue(
-  client: PluginClient,
-  providerId: string,
-  config?: Partial<ProactiveRefreshConfig>,
-): ProactiveRefreshQueue {
-  return new ProactiveRefreshQueue(client, providerId, config);
+export function createProactiveRefreshQueue(config?: Partial<ProactiveRefreshConfig>): ProactiveRefreshQueue {
+  return new ProactiveRefreshQueue(config);
 }

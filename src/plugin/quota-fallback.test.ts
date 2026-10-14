@@ -45,17 +45,6 @@ type CreateSoftQuotaBlockedResponse = (input: {
   requestedModel?: string;
 }) => Response;
 
-type VerifyAccountAccess = (
-  account: {
-    refreshToken: string;
-    email?: string;
-    projectId?: string;
-    managedProjectId?: string;
-  },
-  client: unknown,
-  providerId: string,
-) => Promise<{ status: string; message: string; verifyUrl?: string }>;
-
 type TryFetchWithAgySdkCredentials = (
   input: RequestInfo,
   init: RequestInit | undefined,
@@ -68,7 +57,6 @@ let getHeaderStyleFromUrl: GetHeaderStyleFromUrl | undefined;
 let resolveHeaderRoutingDecision: ResolveHeaderRoutingDecision | undefined;
 let createSoftQuotaBlockedResponse: CreateSoftQuotaBlockedResponse | undefined;
 let tryFetchWithAgySdkCredentials: TryFetchWithAgySdkCredentials | undefined;
-let verifyAccountAccess: VerifyAccountAccess | undefined;
 
 beforeAll(async () => {
   const { __testExports } = await import("../plugin");
@@ -87,9 +75,6 @@ beforeAll(async () => {
   tryFetchWithAgySdkCredentials = (__testExports as {
     tryFetchWithAgySdkCredentials?: TryFetchWithAgySdkCredentials;
   }).tryFetchWithAgySdkCredentials;
-  verifyAccountAccess = (__testExports as {
-    verifyAccountAccess?: VerifyAccountAccess;
-  }).verifyAccountAccess;
 });
 
 describe("API-key fallback credentials", () => {
@@ -293,23 +278,6 @@ describe("header routing decision", () => {
     });
   });
 
-  it("keeps image models on Antigravity without quota fallback", () => {
-    const decision = resolveHeaderRoutingDecision?.(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image:streamGenerateContent",
-      "gemini",
-      {
-        cli_first: true,
-      },
-    );
-
-    expect(decision).toMatchObject({
-      cliFirst: true,
-      preferredHeaderStyle: "antigravity",
-      explicitQuota: true,
-      allowQuotaFallback: false,
-    });
-  });
-
   it("ignores legacy quota_fallback when deciding Gemini fallback availability", () => {
     const decision = resolveHeaderRoutingDecision?.(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:streamGenerateContent",
@@ -383,29 +351,13 @@ describe("account verification probe", () => {
       return new Response("", { status: 200 });
     });
 
-    const client = {
-      auth: {
-        get: vi.fn().mockResolvedValue({
-          data: {
-            type: "oauth",
-            refresh: "refresh-token|user-project|managed-project",
-            access: "access-token",
-            expires: Date.now() + 3_600_000,
-          },
-        }),
-      },
-    };
-
     try {
-      const result = await verifyAccountAccess?.(
-        {
-          refreshToken: "refresh-token",
-          projectId: "user-project",
-          managedProjectId: "managed-project",
-        },
-        client,
-        "google",
-      );
+      const { verifyAccountAccess } = await import("./verification");
+      const result = await verifyAccountAccess({
+        refreshToken: "refresh-token",
+        projectId: "user-project",
+        managedProjectId: "managed-project",
+      });
 
       expect(result?.status).toBe("ok");
       const [url, init] = fetchMock.mock.calls[1]!;

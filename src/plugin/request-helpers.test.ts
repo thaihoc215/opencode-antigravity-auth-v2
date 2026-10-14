@@ -17,7 +17,8 @@ import {
   DEFAULT_THINKING_BUDGET,
   findOrphanedToolUseIds,
   fixClaudeToolPairing,
-  validateAndFixClaudeToolPairing,
+  fixToolResponseGrouping,
+validateAndFixClaudeToolPairing,
   injectParameterSignatures,
   injectToolHardeningInstruction,
   cleanJSONSchemaForAntigravity,
@@ -1758,30 +1759,62 @@ describe("deduplicateThinkingText", () => {
     expect(deduplicateThinkingText("string", buffer)).toBe("string");
   });
 
+  const longThought = "The user wants the build fixed, so first I will read the failing test output carefully.";
+
   it("extracts delta from accumulated Gemini thinking text", () => {
     const buffer = createTestBuffer();
 
     const chunk1 = {
       candidates: [{
         content: {
-          parts: [{ thought: true, text: "Hello " }],
+          parts: [{ thought: true, text: longThought }],
         },
       }],
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result1 = deduplicateThinkingText(chunk1, buffer) as any;
-    expect(result1.candidates[0].content.parts[0].text).toBe("Hello ");
+    expect(result1.candidates[0].content.parts[0].text).toBe(longThought);
 
     const chunk2 = {
       candidates: [{
         content: {
-          parts: [{ thought: true, text: "Hello world" }],
+          parts: [{ thought: true, text: `${longThought} Then rerun it.` }],
         },
       }],
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result2 = deduplicateThinkingText(chunk2, buffer) as any;
-    expect(result2.candidates[0].content.parts[0].text).toBe("world");
+    expect(result2.candidates[0].content.parts[0].text).toBe(" Then rerun it.");
+  });
+
+  it("passes incremental deltas through whole, even when one starts like the previous one", () => {
+    const buffer = createTestBuffer();
+    const emit = (text: string) =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (deduplicateThinkingText({ candidates: [{ content: { parts: [{ thought: true, text }] } }] }, buffer) as any)
+        .candidates[0].content.parts[0]?.text;
+
+    expect(emit(" ")).toBe(" ");
+    expect(emit(" and then")).toBe(" and then");
+    expect(emit("Plan")).toBe("Plan");
+    expect(emit("Planning the fix")).toBe("Planning the fix");
+  });
+
+  it("keeps short thinking pieces that recur in later turns of the session", () => {
+    const displayedThinkingHashes = new Set<string>();
+    const emit = (text: string) =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (deduplicateThinkingText(
+        { candidates: [{ content: { parts: [{ thought: true, text }] } }] },
+        createTestBuffer(),
+        displayedThinkingHashes,
+      ) as any).candidates[0].content.parts;
+
+    expect(emit("Plan")).toHaveLength(1);
+    expect(emit("Plan")).toHaveLength(1);
+    expect(emit(longThought)).toHaveLength(1);
+    // A whole block shown before in this session is a re-send.
+    expect(emit(longThought)).toHaveLength(0);
   });
 
   it("filters out empty delta parts", () => {
@@ -1790,7 +1823,7 @@ describe("deduplicateThinkingText", () => {
     const chunk1 = {
       candidates: [{
         content: {
-          parts: [{ thought: true, text: "Complete thought" }],
+          parts: [{ thought: true, text: longThought }],
         },
       }],
     };
@@ -1800,7 +1833,7 @@ describe("deduplicateThinkingText", () => {
       candidates: [{
         content: {
           parts: [
-            { thought: true, text: "Complete thought" },
+            { thought: true, text: longThought },
             { text: "Regular text" },
           ],
         },
@@ -1816,18 +1849,18 @@ describe("deduplicateThinkingText", () => {
     const buffer = createTestBuffer();
 
     const chunk1 = {
-      content: [{ type: "thinking", thinking: "First " }],
+      content: [{ type: "thinking", thinking: longThought }],
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result1 = deduplicateThinkingText(chunk1, buffer) as any;
-    expect(result1.content[0].thinking).toBe("First ");
+    expect(result1.content[0].thinking).toBe(longThought);
 
     const chunk2 = {
-      content: [{ type: "thinking", thinking: "First part" }],
+      content: [{ type: "thinking", thinking: `${longThought} part` }],
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result2 = deduplicateThinkingText(chunk2, buffer) as any;
-    expect(result2.content[0].thinking).toBe("part");
+    expect(result2.content[0].thinking).toBe(" part");
   });
 
   it("handles new thinking content that does not start with sent text", () => {
@@ -1878,16 +1911,16 @@ describe("deduplicateThinkingText", () => {
   // not just across sessions. Stream far more unique thoughts than the cap and
   // assert the Set does not grow without bound (FIFO eviction of oldest hashes).
   it("bounds the per-session displayedThinkingHashes Set (FIFO eviction)", () => {
-    const buffer = createTestBuffer();
-    const displayedThinkingHashes = new Set<string>();
+    const displayedThinkingHashes= new Set<string>();
 
-    // Each unique full text (buffer keyed by candidate index 0) produces a new
-    // hash. Stream 5000 distinct thoughts on fresh indices to force growth.
+    // Each unique full text produces a new hash. Stream 5000 distinct thoughts
+    // (a fresh buffer each, like separate turns) to force growth.
     for (let i = 0; i < 5000; i++) {
+      const buffer = createTestBuffer();
       const chunk = {
         candidates: [{
           content: {
-            parts: [{ thought: true, text: `unique-thought-${i}` }],
+            parts: [{ thought: true, text: `${longThought} (unique thought ${i})` }],
           },
         }],
       };
@@ -2046,5 +2079,39 @@ describe("cleanJSONSchemaForAntigravity memoization", () => {
     // Second call for the identical shape should be served from cache.
     const cached = cleanJSONSchemaForAntigravity(structuredClone(schema));
     expect(cached).toEqual(uncached);
+  });
+});
+
+describe("fixToolResponseGrouping keeps tool output parts", () => {
+  it("keeps an image and text returned next to a functionResponse", () => {
+    const image = { inlineData: { mimeType: "image/png", data: "AAAA" } };
+    const note = { text: "Screenshot attached." };
+    const contents = [
+      { role: "user", parts: [{ text: "take a screenshot" }] },
+      { role: "model", parts: [{ functionCall: { id: "call-1", name: "screenshot", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "call-1", name: "screenshot", response: { ok: true } } }, image, note] },
+    ];
+
+    const fixed = fixToolResponseGrouping(contents);
+
+    expect(fixed).toHaveLength(3);
+    expect(fixed[2]).toEqual({
+      role: "user",
+      parts: [{ functionResponse: { id: "call-1", name: "screenshot", response: { ok: true } } }, image, note],
+    });
+  });
+
+  it("keeps sibling parts when the response is matched during orphan recovery", () => {
+    const image = { inlineData: { mimeType: "image/png", data: "BBBB" } };
+    const contents = [
+      { role: "model", parts: [{ functionCall: { id: "call-1", name: "screenshot", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "other-id", name: "screenshot", response: {} } }, image] },
+    ];
+
+    const fixed = fixToolResponseGrouping(contents);
+
+    const parts = fixed[1]!.parts;
+    expect(parts[0].functionResponse.id).toBe("call-1");
+    expect(parts[1]).toEqual(image);
   });
 });

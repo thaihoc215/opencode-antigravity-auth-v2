@@ -12,7 +12,7 @@
  * @see https://github.com/lbjlaq/Antigravity-Manager (src-tauri/src/constants.rs)
  */
 
-import { getAntigravityVersion, setAntigravityVersion } from "../constants";
+import { compareVersions, getAntigravityVersion, setAntigravityVersion } from "../constants";
 import { createLogger } from "./logger";
 
 const VERSION_URL = "https://antigravity-auto-updater-974169037036.us-central1.run.app";
@@ -26,17 +26,6 @@ type VersionSource = "api" | "changelog" | "fallback";
 function parseVersion(text: string): string | null {
   const match = text.match(VERSION_REGEX);
   return match ? match[0] : null;
-}
-
-/** Numeric semver compare: negative if a < b, positive if a > b, 0 if equal. */
-function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
 }
 
 async function tryFetchVersion(url: string, maxChars?: number): Promise<string | null> {

@@ -3,7 +3,7 @@
 Add multiple Google accounts to increase your combined quota and improve availability. The plugin automatically rotates between accounts when one is rate-limited.
 
 ```bash
-opencode auth login  # Run again to add more accounts
+opencode auth login google --method antigravity  # Run again to add more accounts
 ```
 
 ---
@@ -46,7 +46,7 @@ Automatic fallback between pools is always enabled for Gemini requests.
 Check your current API usage across all accounts:
 
 ```bash
-opencode auth login
+opencode auth login google --method antigravity
 # Select "Check quotas" from the menu
 ```
 
@@ -72,7 +72,7 @@ node scripts/check-quota.mjs --path /path/to/accounts.json  # Custom path
 Enable or disable specific accounts to control which ones are used for requests:
 
 ```bash
-opencode auth login
+opencode auth login google --method antigravity
 # Select "Manage accounts (enable/disable)"
 ```
 
@@ -92,17 +92,9 @@ Useful when:
 
 ## Adding Accounts
 
-When running `opencode auth login` with existing accounts:
+`opencode auth login google --method antigravity` asks for an **Action** before the browser opens: **Add a new account** (the default) keeps the existing accounts, and **Re-authenticate `<email>`** signs one of them in again.
 
-```
-2 account(s) saved:
-  1. user1@gmail.com
-  2. user2@gmail.com
-
-(a)dd new account(s) or (f)resh start? [a/f]:
-```
-
-Choose `a` to add more accounts while keeping existing ones.
+The account manager CLI (`bunx opencode-antigravity-auth`) adds several accounts in a row (**Add account**). Its plain-text menu, shown when the terminal is not interactive, also offers **(f)resh start**, which replaces the whole pool with the accounts you sign in next.
 
 ---
 
@@ -157,7 +149,7 @@ To manually reset:
 
 ```bash
 rm ~/.config/opencode/antigravity-accounts.json
-opencode auth login
+opencode auth login google --method antigravity
 ```
 
 ---
@@ -176,7 +168,7 @@ When using oh-my-opencode with parallel subagents, multiple processes may select
 
 This distributes sessions across accounts based on process ID.
 
-Alternatively, add more accounts via `opencode auth login`.
+Alternatively, add more accounts via `opencode auth login google --method antigravity`.
 
 ---
 

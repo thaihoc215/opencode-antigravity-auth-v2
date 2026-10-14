@@ -8,7 +8,6 @@ vi.mock("../plugin/storage", async (importOriginal) => {
     saveAccounts: vi.fn(async () => undefined),
     saveAccountsReplace: vi.fn(async () => undefined),
     removeAccountFromStorage: vi.fn(async () => undefined),
-    clearAccounts: vi.fn(async () => undefined),
   };
 });
 
@@ -491,5 +490,91 @@ describe("auth from antigravity-accounts.json", () => {
 
     expect(provider.activation).toBe("enabled");
     await (cleanup as () => void)();
+  });
+});
+
+/** An event stream the test feeds; each subscribe() returns the next one. */
+function controllableEvents(ctx: ReturnType<typeof createFakeContext>["ctx"]) {
+  const streams: Array<{ push(event: unknown): void; end(): void }> = [];
+  ctx.event.subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => {
+    const queue: unknown[] = [];
+    let wake: (() => void) | undefined;
+    let ended = false;
+    const stream = {
+      push(event: unknown) {
+        queue.push(event);
+        wake?.();
+      },
+      end() {
+        ended = true;
+        wake?.();
+      },
+    };
+    signal.addEventListener("abort", () => stream.end());
+    streams.push(stream);
+    return {
+      async *[Symbol.asyncIterator]() {
+        while (true) {
+          if (queue.length > 0) {
+            yield queue.shift();
+            continue;
+          }
+          if (ended) return;
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+        }
+      },
+    };
+  }) as never;
+  return streams;
+}
+
+describe("V2 credential changes", () => {
+  it("ignores credential events that change neither the google credential nor the pool", async () => {
+    const fake = createFakeContext();
+    const streams = controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+
+    streams[0]!.push({ type: "credential.updated" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(fake.ctx.integration.reload).not.toHaveBeenCalled();
+    await (cleanup as () => Promise<void>)();
+  });
+
+  it("rebuilds once after a burst of events when the google credential changed", async () => {
+    const fake = createFakeContext();
+    const streams = controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(1));
+
+    fake.ctx.integration.connection.active.mockResolvedValue({ id: "conn" } as never);
+    fake.ctx.integration.connection.resolve.mockResolvedValue({
+      type: "oauth",
+      refresh: "new-refresh",
+      access: "a",
+      expires: Date.now() + 3_600_000,
+    } as never);
+    streams[0]!.push({ type: "credential.updated" });
+    streams[0]!.push({ type: "credential.switched" });
+
+    await vi.waitFor(() => expect(fake.ctx.integration.reload).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalledTimes(2));
+    await (cleanup as () => Promise<void>)();
+  });
+
+  it("subscribes again when the event stream ends", async () => {
+    const fake = createFakeContext();
+    const streams = controllableEvents(fake.ctx);
+    const cleanup = await plugin.setup(fake.ctx as never);
+    await vi.waitFor(() => expect(streams).toHaveLength(1));
+
+    streams[0]!.end();
+
+    await vi.waitFor(() => expect(streams).toHaveLength(2), { timeout: 3000 });
+    await (cleanup as () => Promise<void>)();
   });
 });

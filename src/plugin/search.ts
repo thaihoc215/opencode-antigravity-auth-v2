@@ -287,7 +287,10 @@ export async function executeSearch(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(wrappedBody),
-      signal: abortSignal ?? AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+      // The host always passes its cancel signal; the timeout must apply too.
+      signal: abortSignal
+        ? AbortSignal.any([abortSignal, AbortSignal.timeout(SEARCH_TIMEOUT_MS)])
+        : AbortSignal.timeout(SEARCH_TIMEOUT_MS),
     });
 
     if (!response.ok) {

@@ -49,6 +49,20 @@ describe("executeSearch", () => {
     vi.restoreAllMocks();
   });
 
+  it("applies its timeout even when the host passes a cancel signal", async () => {
+    const fetchMock = mockFetch(makeResponse("ok"));
+    vi.stubGlobal("fetch", fetchMock);
+    const host = new AbortController();
+
+    await executeSearch({ query: "q" }, "tok", "proj", host.signal);
+
+    const signal = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].signal!;
+    expect(signal).not.toBe(host.signal);
+    expect(signal.aborted).toBe(false);
+    host.abort();
+    expect(signal.aborted).toBe(true);
+  });
+
   it("returns formatted text from the response", async () => {
     vi.stubGlobal("fetch", mockFetch(makeResponse("The answer is 42.")));
     const result = await executeSearch({ query: "what is 42?" }, "tok", "proj");

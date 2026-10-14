@@ -6,7 +6,6 @@ import {
   SKIP_THOUGHT_SIGNATURE,
   MIN_SIGNATURE_LENGTH,
 } from "../constants";
-import { processImageData } from "./image-saver";
 import type { GoogleSearchConfig } from "./transform/types";
 
 const log = createLogger("request-helpers");
@@ -1518,17 +1517,6 @@ function transformGeminiCandidate(candidate: any): any {
       };
     }
 
-    // Handle image data (inlineData) - save to disk (durable, synchronous) and return file path
-    if (part.inlineData) {
-      const result = processImageData({
-        mimeType: part.inlineData.mimeType,
-        data: part.inlineData.data,
-      });
-      if (result) {
-        return { text: result };
-      }
-    }
-
     return part;
   });
 
@@ -2091,14 +2079,18 @@ export function fixToolResponseGrouping(contents: any[]): any[] {
   
   // Collected orphan responses (by ID)
   const collectedResponses = new Map<string, any>();
-  
+
+  // Other parts of tool response messages (an image or text a tool returned
+  // next to its functionResponse). They travel with the regrouped responses.
+  let collectedSiblings: any[] = [];
+
   for (const content of contents) {
     const role = content.role;
     const parts = content.parts || [];
-    
+
     // Check if this is a tool response message
     const responseParts = parts.filter((p: any) => p?.functionResponse);
-    
+
     if (responseParts.length > 0) {
       // Collect responses by ID (skip duplicates)
       for (const resp of responseParts) {
@@ -2107,7 +2099,8 @@ export function fixToolResponseGrouping(contents: any[]): any[] {
           collectedResponses.set(respId, resp);
         }
       }
-      
+      collectedSiblings.push(...parts.filter((p: any) => !p?.functionResponse));
+
       // Try to satisfy the most recent pending group
       for (let i = pendingGroups.length - 1; i >= 0; i--) {
         const group = pendingGroups[i]!;
@@ -2118,7 +2111,8 @@ export function fixToolResponseGrouping(contents: any[]): any[] {
             collectedResponses.delete(id);
             return resp;
           });
-          newContents.push({ parts: groupResponses, role: "user" });
+          newContents.push({ parts: [...groupResponses, ...collectedSiblings], role: "user" });
+          collectedSiblings = [];
           pendingGroups.splice(i, 1);
           break; // Only satisfy one group at a time
         }
@@ -2240,12 +2234,18 @@ export function fixToolResponseGrouping(contents: any[]): any[] {
     if (groupResponses.length > 0) {
       // Insert at correct position (after the model message that made the calls)
       newContents.splice(group.insertAfterIdx + 1, 0, {
-        parts: groupResponses,
+        parts: [...groupResponses, ...collectedSiblings],
         role: "user",
       });
+      collectedSiblings = [];
     }
   }
-  
+
+  // Siblings of responses that matched no tool call still belong to the conversation.
+  if (collectedSiblings.length > 0) {
+    newContents.push({ parts: collectedSiblings, role: "user" });
+  }
+
   return newContents;
 }
 
