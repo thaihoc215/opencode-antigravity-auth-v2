@@ -3,6 +3,17 @@ import type { HeaderStyle, ModelFamily } from "./accounts";
 import { resetAgySdkCredentialStateForTests } from "./api-key";
 import type { AgySdkCredential } from "./api-key";
 
+// Promise.withResolvers is Node 22+; CI and `engines` target Node 20.
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 type ResolveQuotaFallbackHeaderStyle = (input: {
   family: ModelFamily;
   headerStyle: HeaderStyle;
@@ -112,8 +123,8 @@ describe("API-key fallback credentials", () => {
 
   it("tries every available key when concurrent requests advance the shared cursor", async () => {
     resetAgySdkCredentialStateForTests();
-    const badRequestStarted = Promise.withResolvers<void>();
-    const releaseBadRequest = Promise.withResolvers<void>();
+    const badRequestStarted = deferred<void>();
+    const releaseBadRequest = deferred<void>();
     const fetchMock = vi.fn(async (_input: RequestInfo, init?: RequestInit) => {
       const apiKey = new Headers(init?.headers).get("x-goog-api-key");
       if (apiKey === "bad-key") {
