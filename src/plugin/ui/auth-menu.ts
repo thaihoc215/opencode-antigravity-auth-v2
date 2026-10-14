@@ -58,7 +58,7 @@ export async function showAuthMenu(accounts: AccountInfo[]): Promise<AuthMenuAct
     { label: 'Check quotas', value: { type: 'check' }, color: 'cyan' },
     { label: 'Verify one account', value: { type: 'verify' }, color: 'cyan' },
     { label: 'Verify all accounts', value: { type: 'verify-all' }, color: 'cyan' },
-    { label: 'Configure models in opencode.json', value: { type: 'configure-models' }, color: 'cyan' },
+    { label: 'Register plugin in opencode.json', value: { type: 'configure-models' }, color: 'cyan' },
 
     { label: '', value: { type: 'cancel' }, separator: true },
 

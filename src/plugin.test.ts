@@ -6,19 +6,6 @@ import { join } from "node:path";
 import type { PluginClient } from "./plugin/types";
 import { AccountManager } from "./plugin/accounts";
 
-vi.mock("@opencode-ai/plugin", () => ({
-  tool: Object.assign(
-    (definition: unknown) => definition,
-    {
-      schema: {
-        string: () => ({ describe: () => ({}) }),
-        boolean: () => ({ optional: () => ({ default: () => ({ describe: () => ({}) }) }) }),
-        array: () => ({ optional: () => ({ describe: () => ({}) }) }),
-      },
-    },
-  ),
-}));
-
 // Mock storage so disk reads/writes are isolated from real config files.
 // Per-test we override `loadAccounts` to simulate "OAuth accounts on disk".
 vi.mock("./plugin/storage", async (importOriginal) => {
@@ -1202,6 +1189,33 @@ describe("isRemovedModelId", () => {
   });
 });
 
+describe("Gemini 3.8 Flash model surface", () => {
+  it("does not filter out the Gemini 3.8 Flash ids", async () => {
+    const { __testExports } = await import("./plugin");
+    for (const id of [
+      "gemini-3.8-flash",
+      "antigravity-gemini-3.8-flash",
+      "antigravity-gemini-3.8-flash-high",
+      "gemini-3.8-flash-medium",
+    ]) {
+      expect(__testExports.isRemovedModelId(id), `id=${id}`).toBe(false);
+    }
+  });
+
+  it("advertises video and audio input for 3.8 Flash", async () => {
+    const { __testExports } = await import("./plugin");
+    const { OPENCODE_MODEL_DEFINITIONS } = await import("./plugin/config/models");
+
+    const capabilities = __testExports.modalitiesToCapabilities(
+      OPENCODE_MODEL_DEFINITIONS["antigravity-gemini-3.8-flash"]!,
+      undefined,
+    ) as { input: Record<string, boolean> };
+
+    expect(capabilities.input.video).toBe(true);
+    expect(capabilities.input.audio).toBe(true);
+  });
+});
+
 describe("Gemini 3.7 Flash model surface", () => {
   it("does not filter out the Gemini 3.7 Flash ids", async () => {
     const { __testExports } = await import("./plugin");
@@ -1226,5 +1240,78 @@ describe("Gemini 3.7 Flash model surface", () => {
 
     expect(capabilities.input.video).toBe(true);
     expect(capabilities.input.audio).toBe(true);
+  });
+});
+
+describe("replaceStoredAccount", () => {
+  const pool = {
+    version: 4 as const,
+    activeIndex: 0,
+    activeIndexByFamily: { claude: 0, gemini: 0 },
+    accounts: [
+      { email: "a@example.com", refreshToken: "token-a", addedAt: 1, lastUsed: 1 },
+      {
+        email: "b@example.com",
+        refreshToken: "token-b-old",
+        projectId: "project-b",
+        addedAt: 2,
+        lastUsed: 2,
+        verificationRequired: true,
+        rateLimitResetTimes: { gemini: Date.now() + 60_000 },
+      },
+    ],
+  };
+  const signIn = {
+    type: "success" as const,
+    refresh: "token-b-new",
+    access: "access",
+    expires: 0,
+    email: "b@example.com",
+    projectId: "",
+  };
+
+  beforeEach(() => {
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue(structuredClone(pool) as never);
+    vi.mocked(storageModule.saveAccounts).mockClear();
+    vi.mocked(storageModule.saveAccountsReplace).mockClear();
+  });
+
+  it("replaces the entry in place without merging the old one back", async () => {
+    const { replaceStoredAccount } = await import("./plugin");
+
+    await replaceStoredAccount(1, signIn);
+
+    expect(storageModule.saveAccounts).not.toHaveBeenCalled();
+    expect(storageModule.saveAccountsReplace).toHaveBeenCalledTimes(1);
+    const written = vi.mocked(storageModule.saveAccountsReplace).mock.calls[0]![0];
+    expect(written.accounts).toHaveLength(2);
+    expect(written.accounts[0]).toEqual(pool.accounts[0]);
+    expect(written.accounts[1]).toEqual({
+      email: "b@example.com",
+      refreshToken: "token-b-new",
+      projectId: "project-b",
+      managedProjectId: undefined,
+      addedAt: 2,
+      lastUsed: expect.any(Number),
+    });
+  });
+
+  it("tombstones the old refresh token so a running server cannot restore it", async () => {
+    const { replaceStoredAccount } = await import("./plugin");
+
+    await replaceStoredAccount(1, signIn);
+
+    const written = vi.mocked(storageModule.saveAccountsReplace).mock.calls[0]![0];
+    expect(written.deletedRefreshTokenHashes).toEqual([storageModule.hashRefreshToken("token-b-old")]);
+  });
+
+  it("does not tombstone a refresh token that Google returned unchanged", async () => {
+    const { replaceStoredAccount } = await import("./plugin");
+
+    await replaceStoredAccount(1, { ...signIn, refresh: "token-b-old" });
+
+    const written = vi.mocked(storageModule.saveAccountsReplace).mock.calls[0]![0];
+    expect(written.deletedRefreshTokenHashes).toBeUndefined();
+    expect(written.accounts[1]).not.toHaveProperty("verificationRequired");
   });
 });

@@ -3,19 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Mirror plugin.test.ts: the plugin module imports `tool` from the SDK. It is
 // only invoked inside createAntigravityPlugin (not at module load), but we mock
 // it defensively so importing the module never touches the real SDK surface.
-vi.mock("@opencode-ai/plugin", () => ({
-  tool: Object.assign(
-    (definition: unknown) => definition,
-    {
-      schema: {
-        string: () => ({ describe: () => ({}) }),
-        boolean: () => ({ optional: () => ({ default: () => ({ describe: () => ({}) }) }) }),
-        array: () => ({ optional: () => ({ describe: () => ({}) }) }),
-      },
-    },
-  ),
-}));
-
 const { loopEscapeTestHooks } = await import("./plugin");
 const { ANTIGRAVITY_ENDPOINT_FALLBACKS, ANTIGRAVITY_ENDPOINT_PROD } = await import("./constants");
 

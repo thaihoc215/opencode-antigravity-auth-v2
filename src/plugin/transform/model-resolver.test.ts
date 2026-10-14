@@ -143,6 +143,15 @@ describe("resolveModelWithTier", () => {
       expect(result.actualModel).toBe("gemini-3.7-flash");
       expect(result.quotaPreference).toBe("agy-sdk");
     });
+
+    it("strips the Antigravity tier suffix off gemini-3.8-flash for the public API", () => {
+      const result = resolveModelForHeaderStyle(
+        "antigravity-gemini-3.8-flash-high",
+        "agy-sdk",
+      );
+      expect(result.actualModel).toBe("gemini-3.8-flash");
+      expect(result.quotaPreference).toBe("agy-sdk");
+    });
   });
 
   describe("cli_first quota preference", () => {
@@ -279,6 +288,42 @@ describe("resolveModelWithTier", () => {
       expect(
         resolveModelWithTier("antigravity-gemini-3.5-flash-high").actualModel,
       ).toBe("gemini-3-flash-agent");
+    });
+  });
+
+  describe("Gemini 3.8 Flash Antigravity backend ids", () => {
+    it("antigravity-gemini-3.8-flash defaults to the high backend id", () => {
+      // Same default as 3.7: an untiered selection gets maximum thinking.
+      const result = resolveModelWithTier("antigravity-gemini-3.8-flash");
+      expect(result.actualModel).toBe("gemini-3.8-flash-high");
+      expect(result.thinkingLevel).toBe("high");
+    });
+
+    it("maps each effort suffix to its own backend id", () => {
+      for (const level of ["low", "medium", "high"] as const) {
+        const result = resolveModelWithTier(`antigravity-gemini-3.8-flash-${level}`);
+        expect(result.actualModel, `level=${level}`).toBe(`gemini-3.8-flash-${level}`);
+        expect(result.thinkingLevel, `level=${level}`).toBe(level);
+      }
+    });
+
+    it("folds the unsupported minimal tier down to low", () => {
+      const result = resolveModelWithTier("antigravity-gemini-3.8-flash-minimal");
+      expect(result.actualModel).toBe("gemini-3.8-flash-low");
+      expect(result.thinkingLevel).toBe("low");
+    });
+
+    it("keeps bare gemini-3.8-flash bare with default high thinking", () => {
+      const result = resolveModelWithTier("gemini-3.8-flash");
+      expect(result.actualModel).toBe("gemini-3.8-flash");
+      expect(result.thinkingLevel).toBe("high");
+      expect(result.quotaPreference).toBe("antigravity");
+    });
+
+    it("does not disturb the 3.7 Flash backend mapping", () => {
+      expect(resolveModelWithTier("antigravity-gemini-3.7-flash").actualModel).toBe(
+        "gemini-3.7-flash-high",
+      );
     });
   });
 
@@ -484,6 +529,15 @@ describe("resolveModelWithVariant", () => {
       );
       expect(result.actualModel).toBe("gemini-3.7-flash-low");
       expect(result.thinkingLevel).toBe("low");
+    });
+
+    it("rewrites the 3.8 Flash backend id to match the variant effort", () => {
+      const result = resolveModelWithVariant("antigravity-gemini-3.8-flash-high", {
+        thinkingBudget: 4096,
+      });
+      expect(result.actualModel).toBe("gemini-3.8-flash-low");
+      expect(result.thinkingLevel).toBe("low");
+      expect(result.configSource).toBe("variant");
     });
 
     it("leaves the 3.5 Flash backend id on its shared low id", () => {
@@ -733,6 +787,8 @@ describe("geminiMaxOutputTokens", () => {
     // Values taken from the live Antigravity catalog (fetchAvailableModels),
     // not guessed: the Flash ids report 65536 while the Pro ids report 65535.
     for (const model of [
+      "gemini-3.8-flash-high",
+      "gemini-3.8-flash-low",
       "gemini-3.7-flash-high",
       "gemini-3.7-flash-low",
       "gemini-3.6-flash-medium",

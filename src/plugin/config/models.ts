@@ -112,6 +112,14 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     modalities: flash37Modalities(),
     variants: flash37Variants(),
   },
+  // Gemini 3.8 Flash: same tier set, limits and input modalities as 3.7 in the
+  // Antigravity catalog (fetchAvailableModels, 2026-10-14).
+  "antigravity-gemini-3.8-flash": {
+    name: "Gemini 3.8 Flash (Antigravity)",
+    limit: { context: 1048576, output: 65536 },
+    modalities: flash37Modalities(),
+    variants: flash37Variants(),
+  },
   "antigravity-claude-sonnet-4-6": {
     name: "Claude Sonnet 4.6 (Antigravity)",
     limit: { context: 200000, output: 64000 },
@@ -143,6 +151,12 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
   },
   "gemini-3.7-flash": {
     name: "Gemini 3.7 Flash (Gemini CLI)",
+    limit: { context: 1048576, output: 65536 },
+    modalities: flash37Modalities(),
+    variants: flash37Variants(),
+  },
+  "gemini-3.8-flash": {
+    name: "Gemini 3.8 Flash (Gemini CLI)",
     limit: { context: 1048576, output: 65536 },
     modalities: flash37Modalities(),
     variants: flash37Variants(),

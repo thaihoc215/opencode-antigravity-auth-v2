@@ -1,4 +1,3 @@
-import type { PluginInput } from "@opencode-ai/plugin";
 import type { AntigravityTokenExchangeResult } from "../antigravity/oauth";
 
 export interface OAuthAuthDetails {
@@ -48,11 +47,51 @@ export interface LoaderResult {
   fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
 }
 
-export type PluginClient = PluginInput["client"];
+export type ToastVariant = "info" | "warning" | "success" | "error";
+
+/**
+ * The host operations the plugin core calls. The core was written against the
+ * OpenCode V1 SDK client; this interface keeps those call shapes so the core is
+ * host-agnostic. The V2 entrypoint (src/v2/host.ts) implements it on top of the
+ * V2 plugin context, and the account CLI implements it for a plain terminal.
+ */
+export interface PluginClient {
+  app?: {
+    log(options: {
+      body: { service: string; level: string; message: string; extra?: Record<string, unknown> };
+    }): Promise<unknown>;
+  };
+  tui: {
+    showToast(options: {
+      body: { title?: string; message: string; variant: ToastVariant; duration?: number };
+    }): Promise<unknown>;
+  };
+  auth: {
+    set(options: {
+      path: { id: string };
+      body: { type: "oauth"; refresh: string; access: string; expires: number };
+    }): Promise<unknown>;
+  };
+  session: {
+    prompt(options: {
+      path: { id: string };
+      body: {
+        parts: Array<{ type: "text"; text: string }>;
+        agent?: string;
+        model?: { providerID: string; modelID: string };
+      };
+      query?: { directory?: string };
+    }): Promise<unknown>;
+    abort(options: { path: { id: string } }): Promise<unknown>;
+    messages(options: { path: { id: string }; query?: { directory?: string } }): Promise<unknown>;
+  };
+}
 
 export interface PluginContext {
   client: PluginClient;
   directory: string;
+  /** Plugin options from opencode.json; override antigravity.json settings. */
+  options?: Record<string, unknown>;
 }
 
 export type AuthPrompt =
@@ -91,6 +130,45 @@ export interface AuthMethod {
   authorize?: (inputs?: Record<string, string>) => Promise<OAuthAuthorizationResult>;
 }
 
+/**
+ * A host-agnostic tool definition: JSON Schema input plus an executor that
+ * returns the text shown to the model.
+ */
+export interface CoreTool<Args> {
+  description: string;
+  input: Record<string, unknown>;
+  execute(args: Args, signal?: AbortSignal): Promise<string>;
+}
+
+export interface GoogleSearchArgs {
+  query: string;
+  urls?: string[];
+  thinking?: boolean;
+}
+
+export const GOOGLE_SEARCH_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    query: {
+      type: "string",
+      description: "The search query or question to answer using web search",
+    },
+    urls: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "List of specific URLs to fetch and analyze. IMPORTANT: Always extract and include any URLs mentioned by the user in their query here.",
+    },
+    thinking: {
+      type: "boolean",
+      default: true,
+      description: "Enable deep thinking for more thorough analysis (default: true)",
+    },
+  },
+  required: ["query"],
+  additionalProperties: false,
+} as const satisfies Record<string, unknown>;
+
 export interface PluginEventPayload {
   event: {
     type: string;
@@ -105,7 +183,7 @@ export interface PluginResult {
     methods: AuthMethod[];
   };
   event?: (payload: PluginEventPayload) => void;
-  tool?: Record<string, unknown>;
+  tool?: { google_search: CoreTool<GoogleSearchArgs> };
   provider?: ProviderHook;
 }
 

@@ -684,7 +684,7 @@ function mergeAccountStorage(
   };
 }
 
-function hashRefreshToken(refreshToken: string): string {
+export function hashRefreshToken(refreshToken: string): string {
   return createHash("sha256").update(refreshToken).digest("hex");
 }
 

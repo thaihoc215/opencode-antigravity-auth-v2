@@ -2,7 +2,21 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- **OpenCode V2 plugin API (2.0.0)** - The package is now an OpenCode V2 plugin: a default export `{ id: "opencode-antigravity-auth", setup }` built against `@opencode/plugin` (tested with OpenCode 2.0.28). V1 plugins do not run on V2, and this version does not run on OpenCode 1.x — stay on 1.x releases there. Register it with `"plugins": [{ "package": "opencode-antigravity-auth@latest" }]`; entry `options` override `antigravity.json`. The request pipeline, account pool and config are unchanged; the V2 entrypoint (`src/v2/`) wires them to V2 domains:
+  - **Requests** - V2 has no custom `fetch` hook. The plugin sets the `google` provider's package to `aisdk:` + its own AI SDK module and, in the `aisdk` `"sdk"` hook, builds `@ai-sdk/google` with the Antigravity fetch — the same fetch the V1 `auth.loader` returned.
+  - **Login** - An `antigravity` OAuth method on the `google` integration (`opencode auth login google --method antigravity`), with token refresh. It adds the signed-in account to the pool. The interactive account menu (add/delete/enable/disable, quotas) moved to the `opencode-antigravity-auth` CLI (`bunx opencode-antigravity-auth`), since V2 plugins run inside the server.
+  - **Models** - Registered with `provider.transform` (no more `provider.google.models` in `opencode.json`); discovery runs in the background and reloads the provider. Accounts on disk activate the provider. Variants select with `#variant`.
+  - **`google_search`** - Registered with `tool.transform` (JSON Schema input).
+  - **Setup is non-blocking** - V2 waits about 5 seconds for plugins to activate, so the Antigravity version lookup no longer blocks setup; model discovery and the first request wait for it instead.
+  - **Removed on V2** - TUI toasts (logged instead), the session-recovery hook (it read OpenCode 1.x session storage) and the auto-update checker. "Configure models in opencode.json" became "Register plugin in opencode.json", which writes the V2 `plugins` entry and removes the 1.x model copies.
+
 ### Added
+
+- **Action question in `opencode auth login`** - Before the browser opens, the Antigravity OAuth method asks for an action: **Add a new account** (default, non-destructive) or **Re-authenticate `<email>`** for each pool account. Re-authenticating pre-selects that email on the Google sign-in page (`login_hint`), replaces the entry with a fresh token, and rejects a sign-in with a different Google account without changing anything. The question's description names the account manager CLI command for this install, which now has `--help` describing every menu entry, the restart step and the full-logout steps. The browser sign-in flow is extracted to `createBrowserOAuthAuthorization` so both actions reuse it.
+
+- **Gemini 3.8 Flash** - Added `antigravity-gemini-3.8-flash` (Antigravity) and `gemini-3.8-flash` (Gemini CLI). The Antigravity catalog (`fetchAvailableModels`, 2026-10-14) serves `gemini-3.8-flash-low` / `-medium` / `-high`, so 3.8 joins the effort-in-the-id table with the same settings as 3.7: no `minimal` (folds to `low`), default `high`, context 1048576, output 65536, video/audio input. The catalog's `gemini-3.8-flash-tiered` id is not exposed. Verified end to end on OpenCode 2.0.28: `#low` reached the backend as `gemini-3.8-flash-low` and the default as `gemini-3.8-flash-high`. There is no 3.8 Flash Lite in the catalog.
 
 - **Gemini 3.7 Flash** - Added `gemini-3.7-flash` across both quota pools: Antigravity (`antigravity-gemini-3.7-flash`) and Gemini CLI (bare `gemini-3.7-flash`). Same `low`/`medium`/`high` tier set as 3.6 (no `minimal`; a requested `minimal` folds to `low`) and the same effort-in-the-backend-id scheme (`gemini-3.7-flash-low` / `-medium` / `-high`). Two things differ from 3.6 and are handled explicitly: (1) **default effort is `high`** — an id with no tier suffix resolves to `gemini-3.7-flash-high`. This is a deliberate deviation: Google documents `medium` as 3.7's own default and every other model here defaults to `low`, so an untiered 3.7 selection costs more per request than its siblings. (2) **video and audio input** are accepted, so the model definition widens `modalities.input` beyond the text/image/pdf default. Sampling parameters are *not* a difference — `temperature`/`topP`/`topK` are accepted and forwarded unchanged, same as 3.6 (probed 2026-09-05 against `v1internal:generateContent`: `gemini-3.7-flash-high` returns 200 with all three set). The per-generation backend-id mapping is now table-driven (`EFFORT_IN_ID_FLASH_GENERATIONS`) rather than a helper per generation; 3.5 keeps its irregular mapping and 3.6 behaviour is unchanged.
 
@@ -11,6 +25,8 @@
 - **Gemini 3.5 Flash** - Added `gemini-3.5-flash` across both quota pools: Antigravity (`antigravity-gemini-3.5-flash`) and Gemini CLI (bare `gemini-3.5-flash`). Flash exposes `minimal`/`low`/`medium`/`high` thinking levels. Rollout-dependent.
 
 ### Fixed
+
+- **"Refresh token" duplicated the account** - Re-authenticating an account saved through `saveAccounts`, which merges by refresh token. Google usually issues a new refresh token on sign-in, so the old entry stayed next to the new one; when the token was unchanged, the old rate-limit and verification state was merged back. Re-authentication (CLI "Refresh token" and the new login action) now replaces the pool file with `saveAccountsReplace` and tombstones the old token, so a running server saving its in-memory pool cannot restore it.
 
 - **Gemini requests were capped at half their output limit** - OpenCode computes every request's budget as `Math.min(model.limit.output, OUTPUT_TOKEN_MAX)` with `OUTPUT_TOKEN_MAX = 32000`, so Gemini models that permit 65536 were only ever asked for 32000 and long responses truncated early. Raising the declared `limit.output` cannot fix this — the ceiling is a `Math.min` applied after the provider hook, so 65536 and 32000 produce the same request.
 

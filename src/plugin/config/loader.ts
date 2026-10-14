@@ -64,20 +64,7 @@ function loadConfigFile(path: string): Partial<AntigravityConfig> | null {
     }
 
     const content = readFileSync(path, "utf-8");
-    const rawConfig = JSON.parse(content);
-
-    // Validate with Zod (partial - we'll merge with defaults later)
-    const result = AntigravityConfigSchema.partial().safeParse(rawConfig);
-
-    if (!result.success) {
-      log.warn("Config validation error", {
-        path,
-        issues: result.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join(", "),
-      });
-      return null;
-    }
-
-    return result.data;
+    return parsePartialConfig(JSON.parse(content), path);
   } catch (error) {
     if (error instanceof SyntaxError) {
       log.warn("Invalid JSON in config file", { path, error: error.message });
@@ -86,6 +73,24 @@ function loadConfigFile(path: string): Partial<AntigravityConfig> | null {
     }
     return null;
   }
+}
+
+/**
+ * Validate a partial config object, returning null (and logging) when invalid.
+ */
+function parsePartialConfig(rawConfig: unknown, source: string): Partial<AntigravityConfig> | null {
+  // Validate with Zod (partial - we'll merge with defaults later)
+  const result = AntigravityConfigSchema.partial().safeParse(rawConfig);
+
+  if (!result.success) {
+    log.warn("Config validation error", {
+      path: source,
+      issues: result.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join(", "),
+    });
+    return null;
+  }
+
+  return result.data;
 }
 
 /**
@@ -116,9 +121,10 @@ function mergeConfigs(
  * Load the complete configuration.
  * 
  * @param directory - The project directory (for project-level config)
+ * @param options - Plugin options from opencode.json `plugins[].options`; highest precedence
  * @returns Fully resolved configuration
  */
-export function loadConfig(directory: string): AntigravityConfig {
+export function loadConfig(directory: string, options?: Record<string, unknown>): AntigravityConfig {
   // Start with defaults
   let config: AntigravityConfig = { ...DEFAULT_CONFIG };
 
@@ -134,6 +140,14 @@ export function loadConfig(directory: string): AntigravityConfig {
   const projectConfig = loadConfigFile(projectConfigPath);
   if (projectConfig) {
     config = mergeConfigs(config, projectConfig);
+  }
+
+  // Plugin options from the OpenCode config override both files
+  if (options && Object.keys(options).length > 0) {
+    const optionsConfig = parsePartialConfig(options, "opencode.json plugin options");
+    if (optionsConfig) {
+      config = mergeConfigs(config, optionsConfig);
+    }
   }
 
   return config;
