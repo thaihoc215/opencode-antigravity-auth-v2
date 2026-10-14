@@ -18,25 +18,17 @@ delete rawSchema.required;
 
 const optionDescriptions: Record<string, string> = {
   quiet_mode:
-    "Suppress most toast notifications (rate limit, account switching). Recovery toasts always shown.",
+    "Suppress most toast notifications (rate limit, account switching).",
   debug:
     "Enable debug logging to file.",
   log_dir:
     "Custom directory for debug logs.",
   keep_thinking:
     "Preserve thinking blocks for Claude models using signature caching. May cause signature errors.",
-  session_recovery:
-    "Enable automatic session recovery from tool_result_missing errors.",
-  auto_resume:
-    "Automatically send resume prompt after successful recovery.",
-  resume_text:
-    "Custom text to send when auto-resuming after recovery.",
   empty_response_max_attempts:
     "Maximum retry attempts when Antigravity returns an empty response (no candidates).",
   empty_response_retry_delay_ms:
     "Delay in milliseconds between empty response retries.",
-  tool_id_recovery:
-    "Enable tool ID orphan recovery. Matches mismatched tool responses by function name or creates placeholders.",
   claude_tool_hardening:
     "Enable tool hallucination prevention for Claude models. Injects parameter signatures and strict usage rules.",
   claude_prompt_auto_caching:
@@ -47,13 +39,8 @@ const optionDescriptions: Record<string, string> = {
     "Seconds before token expiry to trigger proactive refresh.",
   proactive_refresh_check_interval_seconds:
     "Interval between proactive refresh checks in seconds.",
-  auto_update: "Enable automatic plugin updates.",
-  quota_fallback:
-    "Deprecated: accepted for backward compatibility but ignored at runtime. Gemini fallback between Antigravity and Gemini CLI is always enabled.",
   cli_first:
     "Prefer gemini-cli routing before Antigravity for Gemini models. When false (default), Antigravity is tried first and gemini-cli is fallback.",
-  toast_scope:
-    "Controls which sessions show toast notifications. 'root_only' (default) shows in root session only, 'all' shows in all sessions.",
   scheduling_mode:
     "Rate limit scheduling strategy. 'cache_first' (default) waits for cooldowns, 'balance' distributes across accounts, 'performance_first' picks fastest available.",
   max_cache_first_wait_seconds:

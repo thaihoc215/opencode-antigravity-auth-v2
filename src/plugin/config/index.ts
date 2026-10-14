@@ -6,8 +6,8 @@
  * import { loadConfig, type AntigravityConfig } from "./config";
  * 
  * const config = loadConfig(directory);
- * if (config.session_recovery) {
- *   // Enable session recovery
+ * if (config.keep_thinking) {
+ *   // Preserve thinking blocks
  * }
  * ```
  */

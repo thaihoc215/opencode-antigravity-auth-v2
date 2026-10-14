@@ -13,9 +13,6 @@ const log = createLogger("v2.host");
  *   OAuth credential. V2 plugins cannot write credentials; the account pool on
  *   disk stays the source of truth, so a clear becomes a "needs sign-in"
  *   connection status and a store is a no-op.
- * - Sessions map to `ctx.session`. `messages` returns no data: V2 messages use a
- *   different shape, and the V1 session-recovery hook that reads them is not
- *   wired in V2.
  */
 export function createV2Client(ctx: Plugin.Context, integrationID: string): PluginClient {
   return {
@@ -38,18 +35,6 @@ export function createV2Client(ctx: Plugin.Context, integrationID: string): Plug
             message: "Google revoked the stored Antigravity refresh tokens. Sign in again.",
           },
         });
-      },
-    },
-    session: {
-      async prompt({ path, body }) {
-        const text = body.parts.map((part) => part.text).join("\n");
-        return ctx.session.prompt({ sessionID: path.id, text });
-      },
-      async abort({ path }) {
-        return ctx.session.interrupt({ sessionID: path.id });
-      },
-      async messages() {
-        return { data: [] };
       },
     },
   };

@@ -4,7 +4,6 @@ import {
   ANTIGRAVITY_ENDPOINT,
   ANTIGRAVITY_ENDPOINT_FALLBACKS,
   ANTIGRAVITY_ENDPOINT_PROD,
-  ANTIGRAVITY_PROVIDER_ID,
   getAntigravityHeaders,
   type HeaderStyle,
 } from "./constants";
@@ -49,13 +48,11 @@ import {
   saveAccountsReplace,
 } from "./plugin/storage";
 import { AccountManager, type ModelFamily, parseRateLimitReason, calculateBackoffMs, computeSoftQuotaCacheTtlMs } from "./plugin/accounts";
-import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import { loadConfig, initRuntimeConfig, type AntigravityConfig } from "./plugin/config";
-import { createSessionRecoveryHook, getRecoverySuccessToast } from "./plugin/recovery";
 import { checkAccountsQuota, fetchAvailableModels } from "./plugin/quota";
 import { initDiskSignatureCache } from "./plugin/cache";
 import { createProactiveRefreshQueue, type ProactiveRefreshQueue } from "./plugin/refresh-queue";
-import { initLogger, createLogger } from "./plugin/logger";
+import { createLogger } from "./plugin/logger";
 import { initHealthTracker, getHealthTracker, initTokenTracker, getTokenTracker } from "./plugin/rotation";
 import { initAntigravityVersion } from "./plugin/version";
 import { executeSearch } from "./plugin/search";
@@ -85,12 +82,12 @@ import type {
   GetAuth,
   GoogleSearchArgs,
   LoaderResult,
+  OAuthAuthDetails,
   OAuthAuthorizationResult,
   PluginClient,
   PluginContext,
   PluginResult,
   ProjectContextResult,
-  Provider,
   ProviderModel,
 } from "./plugin/types";
 import { GOOGLE_SEARCH_INPUT_SCHEMA } from "./plugin/types";
@@ -102,25 +99,6 @@ const MAX_WARMUP_RETRIES = 2;
 // MAX_WARMUP_RETRIES (membership is only 0/1), so the retry cap was dead.
 const warmupAttemptCounts = new Map<string, number>();
 const warmupSucceededSessionIds = new Set<string>();
-
-// Track if this plugin instance is running in a child session (subagent, background task).
-// Used to filter toasts based on toast_scope config. These are a LAST-EVENT
-// heuristic set by the most recent session.created event.
-//
-// KNOWN LIMITATION (do not re-attempt per-request correlation): a single plugin
-// instance serves many concurrent sessions, so a subagent's session.created can
-// flip these globals while a root session's request is still in flight, briefly
-// mis-scoping a toast. This race cannot currently be closed from the fetch
-// interceptor because it has no access to the request's OpenCode session id —
-// the Gemini request payload/headers do not carry it, and `prepared.sessionId`
-// is a signature *cache* key (`${PLUGIN_SESSION_ID}:model:project:conversation`
-// from request.ts), NOT the `session.created` `info.id`. A prior attempt to key a
-// per-session parent map by `prepared.sessionId` could never match and was
-// removed as dead code. Closing the race requires a real correlation source
-// (OpenCode exposing the session id to the provider fetch, or a plugin API for
-// the active session).
-let isChildSession = false;
-let childSessionParentID: string | undefined = undefined;
 
 const log = createLogger("plugin");
 
@@ -250,67 +228,15 @@ async function modelsFromOAuthAuth(
   return modelsFromAntigravityAvailableModels(response.models ?? {});
 }
 
-function hasProviderModelRuntimeShape(model: ProviderModel | undefined): boolean {
-  return !!model
-    && typeof model.api === "object"
-    && model.api !== null
-    && typeof model.capabilities === "object"
-    && model.capabilities !== null;
-}
-
-function modalitiesToCapabilities(model: ProviderModel, existing: ProviderModel | undefined): Record<string, unknown> {
-  const modalities = model.modalities as { input?: string[]; output?: string[] } | undefined;
-  const existingCapabilities = existing?.capabilities as Record<string, unknown> | undefined;
-  const existingInput = existingCapabilities?.input as Record<string, unknown> | undefined;
-  const existingOutput = existingCapabilities?.output as Record<string, unknown> | undefined;
-
-  const input = modalities?.input ?? [];
-  const output = modalities?.output ?? [];
-
-  return {
-    temperature: existingCapabilities?.temperature ?? true,
-    reasoning: existingCapabilities?.reasoning ?? !!model.variants,
-    attachment: existingCapabilities?.attachment ?? (input.includes("image") || input.includes("pdf")),
-    toolcall: existingCapabilities?.toolcall ?? true,
-    input: {
-      text: existingInput?.text ?? input.includes("text"),
-      audio: existingInput?.audio ?? input.includes("audio"),
-      image: existingInput?.image ?? input.includes("image"),
-      video: existingInput?.video ?? input.includes("video"),
-      pdf: existingInput?.pdf ?? input.includes("pdf"),
-    },
-    output: {
-      text: existingOutput?.text ?? output.includes("text"),
-      audio: existingOutput?.audio ?? output.includes("audio"),
-      image: existingOutput?.image ?? output.includes("image"),
-      video: existingOutput?.video ?? output.includes("video"),
-      pdf: existingOutput?.pdf ?? output.includes("pdf"),
-    },
-    interleaved: existingCapabilities?.interleaved ?? false,
-  };
-}
-
-function costForProviderModel(model: ProviderModel, existing: ProviderModel | undefined): Record<string, unknown> {
-  const existingCost = existing?.cost as Record<string, unknown> | undefined;
-  const modelCost = model.cost;
-  return {
-    input: modelCost?.input ?? existingCost?.input ?? 0,
-    output: modelCost?.output ?? existingCost?.output ?? 0,
-    cache: existingCost?.cache ?? { read: 0, write: 0 },
-  };
-}
-
 /**
  * User-facing Gemini model families intentionally removed from this plugin
  * (Gemini 2.5 Pro/Flash, Gemini 3 Pro, Gemini 3 Flash, Gemini 3.1 Flash
- * Lite/Image). Filtered out of BOTH the static definitions and anything
- * surfaced by live model discovery, so they never reappear regardless of
- * source. Kept models that share a prefix (gemini-3.5-flash, gemini-3.1-pro)
- * are preserved because the checks match the removed families exactly:
- * "gemini-3.5-flash" does not start with "gemini-3-flash", and "gemini-3.1-pro"
- * does not start with "gemini-3-pro". The internal backend id
- * "gemini-3-flash-agent" (used by gemini-3.5-flash high tier) is never passed
- * through this hook, so it is unaffected.
+ * Lite/Image, Gemini 3.5/3.6/3.7 Flash). Filtered out of BOTH the static
+ * definitions and anything surfaced by live model discovery or OpenCode's own
+ * catalog, so they never reappear regardless of source. Kept models that share
+ * a prefix (gemini-3.8-flash, gemini-3.1-pro) are preserved because the checks
+ * match the removed families exactly: "gemini-3.1-pro" does not start with
+ * "gemini-3-pro".
  */
 export function isRemovedModelId(modelId: string): boolean {
   const id = modelId
@@ -321,57 +247,11 @@ export function isRemovedModelId(modelId: string): boolean {
     id.startsWith("gemini-2.5") ||
     id.startsWith("gemini-3-pro") ||
     id.startsWith("gemini-3-flash") ||
+    id.startsWith("gemini-3.5-flash") ||
+    id.startsWith("gemini-3.6-flash") ||
+    id.startsWith("gemini-3.7-flash") ||
     id.startsWith("gemini-3.1-flash")
   );
-}
-
-function normalizeProviderHookModels(
-  providerId: string,
-  provider: Provider,
-  definitions: Record<string, ProviderModel>,
-  existingModels: Record<string, ProviderModel> = provider.models ?? {},
-): Record<string, ProviderModel> {
-  const normalized: Record<string, ProviderModel> = {};
-  const providerApi = typeof provider.api === "string" ? provider.api : "";
-  const providerNpm = typeof provider.npm === "string" ? provider.npm : "@ai-sdk/google";
-
-  for (const [id, model] of Object.entries(definitions)) {
-    if (isRemovedModelId(id)) continue;
-    const existing = existingModels[id];
-    if (hasProviderModelRuntimeShape(model)) {
-      normalized[id] = model;
-      continue;
-    }
-
-    const limit = model.limit as { context?: number; input?: number; output?: number } | undefined;
-    const existingLimit = existing?.limit as { context?: number; input?: number; output?: number } | undefined;
-    const existingApi = existing?.api as Record<string, unknown> | undefined;
-
-    normalized[id] = {
-      ...existing,
-      ...model,
-      id,
-      providerID: existing?.providerID ?? provider.id ?? providerId,
-      api: {
-        id: existingApi?.id ?? id,
-        url: existingApi?.url ?? providerApi,
-        npm: existingApi?.npm ?? providerNpm,
-      },
-      status: existing?.status ?? model.status ?? "active",
-      headers: existing?.headers ?? model.headers ?? {},
-      options: existing?.options ?? model.options ?? {},
-      cost: costForProviderModel(model, existing),
-      limit: {
-        context: limit?.context ?? existingLimit?.context ?? 0,
-        input: limit?.input ?? existingLimit?.input,
-        output: limit?.output ?? existingLimit?.output ?? 0,
-      },
-      capabilities: modalitiesToCapabilities(model, existing),
-      release_date: existing?.release_date ?? model.release_date ?? "",
-    };
-  }
-
-  return normalized;
 }
 
 async function tryAgySdkFallbackForRequest(
@@ -724,7 +604,7 @@ function extractVerificationErrorDetails(bodyText: string): {
  * distinct from `validation_required` (account needs re-verification): it
  * signals the resolved backend model id isn't entitled for this managed
  * project — e.g. a staged Google rollout gate on a newly-added backend
- * variant (such as the Gemini 3.5 Flash "agent"/high-tier id) — not a
+ * variant (such as a new Flash effort tier) — not a
  * credential problem.
  *
  * Retrying the other Antigravity endpoints can't help (the project
@@ -736,6 +616,9 @@ function isModelPermissionDeniedOnProjectError(bodyText: string): boolean {
   const decoded = decodeEscapedText(bodyText).toLowerCase();
   return decoded.includes("permission denied on resource project");
 }
+
+/** Cheapest Antigravity model id, used to probe whether an account can serve requests. */
+const VERIFICATION_PROBE_MODEL = "gemini-3.8-flash-low";
 
 async function verifyAccountAccess(
   account: {
@@ -792,9 +675,9 @@ async function verifyAccountAccess(
 
   const requestBody = {
     project: projectId,
-    model: "gemini-3.5-flash-low",
+    model: VERIFICATION_PROBE_MODEL,
     request: {
-      model: "gemini-3.5-flash-low",
+      model: VERIFICATION_PROBE_MODEL,
       contents: [{ role: "user", parts: [{ text: "ping" }] }],
       generationConfig: { maxOutputTokens: 1, temperature: 0 },
     },
@@ -1361,6 +1244,50 @@ export async function createBrowserOAuthAuthorization(
   };
 }
 
+/**
+ * Lends OpenCode's still-valid access token to the pool account it belongs to
+ * (same refresh token), sparing a token refresh. Any other credential is ignored.
+ */
+function withCredentialAccess(poolAuth: OAuthAuthDetails, credential: AuthDetails | undefined): OAuthAuthDetails {
+  if (!credential || !isOAuthAuth(credential) || !credential.access || accessTokenExpired(credential)) {
+    return poolAuth;
+  }
+  const sameAccount =
+    parseRefreshParts(credential.refresh).refreshToken === parseRefreshParts(poolAuth.refresh).refreshToken;
+  return sameAccount ? { ...poolAuth, access: credential.access, expires: credential.expires } : poolAuth;
+}
+
+/**
+ * OAuth auth for the active account of the pool in antigravity-accounts.json:
+ * the stored `activeIndex` when that account is enabled, else the first enabled
+ * account, else the first account with a refresh token. `undefined` when no
+ * account has a refresh token. The access token is left empty for the caller
+ * to refresh.
+ */
+async function loadActivePoolAuth(): Promise<OAuthAuthDetails | undefined> {
+  const storage = await loadAccounts();
+  const accounts = storage?.accounts ?? [];
+  const usable = (account: (typeof accounts)[number] | undefined) => !!account?.refreshToken;
+  const active = accounts[storage?.activeIndex ?? 0];
+  const account =
+    (usable(active) && active?.enabled !== false ? active : undefined) ??
+    accounts.find((candidate) => usable(candidate) && candidate.enabled !== false) ??
+    accounts.find(usable);
+  if (!account) {
+    return undefined;
+  }
+  return {
+    type: "oauth",
+    refresh: formatRefreshParts({
+      refreshToken: account.refreshToken,
+      projectId: account.projectId,
+      managedProjectId: account.managedProjectId,
+    }),
+    access: "",
+    expires: 0,
+  };
+}
+
 function buildAuthSuccessFromStoredAccount(account: {
   refreshToken: string;
   projectId?: string;
@@ -1864,10 +1791,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
   
   // Initialize debug with config
   initializeDebug(config);
-  
-  // Initialize structured logger for TUI integration
-  initLogger(client);
-  
+
   // Fetch latest Antigravity version from remote API in the background (falls back
   // to hardcoded). Plugin setup must stay fast: OpenCode V2 gives plugins a few
   // seconds to activate. Model discovery and the loader wait for it, since the
@@ -1902,82 +1826,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
     initDiskSignatureCache(config.signature_cache);
   }
   
-  // Initialize session recovery hook with full context
-  const sessionRecovery = createSessionRecoveryHook({ client, directory }, config);
-  
-  const updateChecker = createAutoUpdateCheckerHook(client, directory, {
-    showStartupToast: true,
-    autoUpdate: config.auto_update,
-  });
-
-  // Event handler for session recovery and updates
-  const eventHandler = async (input: { event: { type: string; properties?: unknown } }) => {
-    // Forward to update checker
-    await updateChecker.event(input);
-    
-    // Track if this is a child session (subagent, background task)
-    // This is used to filter toasts based on toast_scope config
-    if (input.event.type === "session.created") {
-      const props = input.event.properties as { info?: { id?: string; parentID?: string } } | undefined;
-      const sessionID = props?.info?.id;
-      const parentID = props?.info?.parentID;
-      if (parentID) {
-        isChildSession = true;
-        childSessionParentID = parentID;
-        log.debug("child-session-detected", { sessionID, parentID });
-      } else {
-        // Reset for root sessions - important when plugin instance is reused
-        isChildSession = false;
-        childSessionParentID = undefined;
-        log.debug("root-session-detected", { sessionID });
-      }
-    }
-    
-    // Handle session recovery
-    if (sessionRecovery && input.event.type === "session.error") {
-      const props = input.event.properties as Record<string, unknown> | undefined;
-      const sessionID = props?.sessionID as string | undefined;
-      const messageID = props?.messageID as string | undefined;
-      const error = props?.error;
-      
-      if (sessionRecovery.isRecoverableError(error)) {
-        const messageInfo = {
-          id: messageID,
-          role: "assistant" as const,
-          sessionID,
-          error,
-        };
-        
-        // handleSessionRecovery now does the actual fix (injects tool_result, etc.)
-        const recovered = await sessionRecovery.handleSessionRecovery(messageInfo);
-
-        // Only send "continue" AFTER successful tool_result_missing recovery
-        // (thinking recoveries already resume inside handleSessionRecovery)
-        if (recovered && sessionID && config.auto_resume) {
-          // For tool_result_missing, we need to send continue after injecting tool_results
-          await client.session.prompt({
-            path: { id: sessionID },
-            body: { parts: [{ type: "text", text: config.resume_text }] },
-            query: { directory },
-          }).catch(() => {});
-          
-          // Show success toast (respects toast_scope for child sessions)
-          const successToast = getRecoverySuccessToast();
-          log.debug("recovery-toast", { ...successToast, isChildSession, toastScope: config.toast_scope });
-          if (!(config.toast_scope === "root_only" && isChildSession)) {
-            await client.tui.showToast({
-              body: {
-                title: successToast.title,
-                message: successToast.message,
-                variant: "success",
-              },
-            }).catch(() => {});
-          }
-        }
-      }
-    }
-  };
-
   // Create google_search tool with access to auth context
   const googleSearchTool: CoreTool<GoogleSearchArgs> = {
     description: "Search the web using Google Search and analyze URLs. Returns real-time information from the internet with source citations. Use this when you need up-to-date information about current events, recent developments, or any topic that may have changed. You can also provide specific URLs to analyze. IMPORTANT: If the user mentions or provides any URLs in their query, you MUST extract those URLs and pass them in the 'urls' parameter for direct analysis.",
@@ -1985,36 +1833,53 @@ export const createAntigravityPlugin = (providerId: string) => async (
     async execute(args, signal) {
       log.debug("Google Search tool called", { query: args.query, urlCount: args.urls?.length ?? 0 });
 
-      // Get current auth context
-      const auth = cachedGetAuth ? await cachedGetAuth() : null;
-      if (!auth || !isOAuthAuth(auth)) {
-        return "Error: Not authenticated with Antigravity. Please run `opencode auth login` to authenticate.";
+      // Search as the pool account chat requests currently use; before the first
+      // request, the pool's active account; OpenCode's credential only when the
+      // pool is empty.
+      const manager = activeAccountManager;
+      const account = manager?.getCurrentAccountForFamily("gemini") ?? manager?.getEnabledAccounts()[0] ?? null;
+      let auth: OAuthAuthDetails | undefined =
+        manager && account ? manager.toAuthDetails(account) : await loadActivePoolAuth();
+      if (!auth) {
+        const credential = cachedGetAuth ? await cachedGetAuth() : null;
+        if (credential && isOAuthAuth(credential)) {
+          auth = credential;
+        }
+      }
+      if (!auth) {
+        return "Error: No Antigravity account. Run `opencode auth login google --method antigravity` to add one.";
       }
 
-      // Get access token and project ID
-      const parts = parseRefreshParts(auth.refresh);
-      const projectId = parts.managedProjectId || parts.projectId || "unknown";
-
-      // Ensure we have a valid access token
-      let accessToken = auth.access;
-      if (!accessToken || accessTokenExpired(auth)) {
+      if (!auth.access || accessTokenExpired(auth)) {
         try {
           const refreshed = await refreshAccessToken(auth, client, providerId);
-          accessToken = refreshed?.access;
+          if (refreshed) {
+            auth = refreshed;
+            if (manager && account) {
+              manager.updateFromAuth(account, refreshed);
+            }
+          }
         } catch (error) {
           return `Error: Failed to refresh access token: ${error instanceof Error ? error.message : String(error)}`;
         }
       }
 
+      const accessToken = auth.access;
       if (!accessToken) {
-        return "Error: No valid access token available. Please run `opencode auth login` to re-authenticate.";
+        return "Error: No valid access token available. Re-authenticate with `opencode auth login google --method antigravity`.";
+      }
+
+      let projectId: string;
+      try {
+        projectId = (await ensureProjectContext(auth)).effectiveProjectId;
+      } catch (error) {
+        return `Error: Could not resolve the Antigravity project: ${error instanceof Error ? error.message : String(error)}`;
       }
 
       return executeSearch(
         {
           query: args.query,
           urls: args.urls,
-          thinking: args.thinking ?? true,
         },
         accessToken,
         projectId,
@@ -2024,55 +1889,37 @@ export const createAntigravityPlugin = (providerId: string) => async (
   };
 
   return {
-    event: eventHandler,
     tool: {
       google_search: googleSearchTool,
     },
-    provider: {
-      id: providerId,
-      async models(provider: Provider, context): Promise<Record<string, ProviderModel>> {
-        await versionReady;
-        const fallbackModels = normalizeProviderHookModels(
-          providerId,
-          provider,
-          mergeModelDefinitions(OPENCODE_MODEL_DEFINITIONS, provider.models ?? {}),
-        );
-        if (!config.model_discovery.enabled) {
-          return fallbackModels;
-        }
+    async models(auth: AuthDetails | undefined): Promise<Record<string, ProviderModel>> {
+      await versionReady;
+      if (!config.model_discovery.enabled) {
+        return OPENCODE_MODEL_DEFINITIONS;
+      }
 
-        let auth: AuthDetails | undefined;
-        try {
-          auth = cachedGetAuth ? await cachedGetAuth() : context.auth;
-        } catch (error) {
-          log.debug("model-discovery-fallback", { error: error instanceof Error ? error.message : String(error) });
-          return fallbackModels;
-        }
-        const [geminiResult, antigravityResult] = await Promise.allSettled([
-          modelsFromAgySdkCredentials(config, auth),
-          modelsFromOAuthAuth(config, auth, client, providerId),
-        ]);
+      // Antigravity discovery runs as the pool's active account (OpenCode's
+      // credential only when the pool is empty); Gemini API discovery uses keys.
+      const poolAuth = await loadActivePoolAuth().catch(() => undefined);
+      const discoveryAuth = poolAuth ? withCredentialAccess(poolAuth, auth) : auth;
+      const [geminiResult, antigravityResult] = await Promise.allSettled([
+        modelsFromAgySdkCredentials(config, auth),
+        modelsFromOAuthAuth(config, discoveryAuth, client, providerId),
+      ]);
 
-        const geminiModels = geminiResult.status === "fulfilled" ? geminiResult.value : {};
-        const antigravityModels = antigravityResult.status === "fulfilled" ? antigravityResult.value : {};
-        if (geminiResult.status === "rejected" || antigravityResult.status === "rejected") {
-          log.debug("model-discovery-partial-fallback", {
-            geminiError: geminiResult.status === "rejected" ? String(geminiResult.reason) : undefined,
-            antigravityError: antigravityResult.status === "rejected" ? String(antigravityResult.reason) : undefined,
-          });
-        }
+      const geminiModels = geminiResult.status === "fulfilled" ? geminiResult.value : {};
+      const antigravityModels = antigravityResult.status === "fulfilled" ? antigravityResult.value : {};
+      if (geminiResult.status === "rejected" || antigravityResult.status === "rejected") {
+        log.debug("model-discovery-partial-fallback", {
+          geminiError: geminiResult.status === "rejected" ? String(geminiResult.reason) : undefined,
+          antigravityError: antigravityResult.status === "rejected" ? String(antigravityResult.reason) : undefined,
+        });
+      }
 
-        return normalizeProviderHookModels(
-          providerId,
-          provider,
-          mergeModelDefinitions(fallbackModels, geminiModels, antigravityModels),
-          fallbackModels,
-        );
-      },
+      return mergeModelDefinitions(OPENCODE_MODEL_DEFINITIONS, geminiModels, antigravityModels);
     },
     auth: {
-    provider: providerId,
-    loader: async (getAuth: GetAuth, provider: Provider): Promise<LoaderResult | Record<string, unknown>> => {
+    loader: async (getAuth: GetAuth): Promise<LoaderResult | Record<string, unknown>> => {
       // Cache getAuth for tool access
       cachedGetAuth = getAuth;
       await versionReady;
@@ -2087,47 +1934,22 @@ export const createAntigravityPlugin = (providerId: string) => async (
       const apiKeyAuth = isApiKeyAuth(initialAuth) ? initialAuth : null;
       const initialAgySdkCredentials = getAgySdkCredentials(config, apiKeyAuth);
 
-      // Promote disk-stored OAuth accounts ahead of the API-key-only branch.
-      // When OpenCode hands us non-OAuth auth (e.g. oh-my-opencode flips the
-      // google provider into API-key mode, or the user only ever ran OAuth via
-      // this plugin's own login flow), `~/.config/opencode/antigravity-accounts.json`
-      // may still hold usable OAuth refresh tokens. Synthesize an OAuth `auth`
-      // from the active disk account so antigravity-* / Claude requests route
-      // through the Antigravity OAuth backend instead of being short-circuited
-      // as 404s by the API-key-only interceptor below.
-      let auth = initialAuth;
+      // Accounts live in antigravity-accounts.json. When OpenCode hands us
+      // non-OAuth auth (no credential, or API-key mode such as oh-my-opencode's),
+      // use the pool's active account so antigravity-* / Claude requests route
+      // through the Antigravity OAuth backend instead of being short-circuited as
+      // 404s by the API-key-only interceptor below.
+      let auth: AuthDetails = initialAuth;
       if (!isOAuthAuth(initialAuth)) {
-        const diskAccounts = await loadAccounts();
-        const accountsOnDisk = diskAccounts?.accounts ?? [];
-        const candidateIndex = typeof diskAccounts?.activeIndex === "number"
-          && diskAccounts.activeIndex >= 0
-          && diskAccounts.activeIndex < accountsOnDisk.length
-          ? diskAccounts.activeIndex
-          : 0;
-        const activeAccount = accountsOnDisk[candidateIndex]
-          ?? accountsOnDisk.find((acc) => !!acc?.refreshToken);
-        if (activeAccount?.refreshToken) {
-          auth = {
-            type: "oauth",
-            refresh: formatRefreshParts({
-              refreshToken: activeAccount.refreshToken,
-              projectId: activeAccount.projectId,
-              managedProjectId: activeAccount.managedProjectId,
-            }),
-            access: "",
-            expires: 0,
-          };
-        }
+        auth = (await loadActivePoolAuth()) ?? initialAuth;
       }
-       
-      // If OpenCode has no valid OAuth auth, clear any stale account storage
+
+      // No OAuth account anywhere. The pool file is left alone: it is the source
+      // of truth, and loadAccounts() also reports an unreadable file (a typo from
+      // a hand edit, a lock held by another process) as "no accounts". Accounts
+      // are deleted through the account manager CLI only.
       if (!isOAuthAuth(auth)) {
         if (initialAgySdkCredentials.length === 0) {
-          try {
-            await clearAccounts();
-          } catch {
-            // ignore
-          }
           return {};
         }
 
@@ -2162,13 +1984,9 @@ export const createAntigravityPlugin = (providerId: string) => async (
         };
       }
 
-      // Validate that stored accounts are in sync with OpenCode's auth
-      // If OpenCode's refresh token doesn't match any stored account, clear stale storage
-      const authParts = parseRefreshParts(auth.refresh);
-      const storedAccounts = await loadAccounts();
-      
-      // Note: AccountManager now ensures the current auth is always included in accounts
-
+      // The pool on disk is the source of truth for requests: `auth` only seeds it
+      // when no antigravity-accounts.json exists yet, and lends its access token
+      // to the pool account with the same refresh token.
       const accountManager = await AccountManager.loadFromDisk(auth);
       activeAccountManager = accountManager;
       if (accountManager.getAccountCount() > 0) {
@@ -2196,14 +2014,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
             });
           } catch {
             // TUI may not be available
-          }
-        }
-      }
-
-      if (provider.models) {
-        for (const model of Object.values(provider.models)) {
-          if (model) {
-            model.cost = { input: 0, output: 0 };
           }
         }
       }
@@ -2293,24 +2103,14 @@ export const createAntigravityPlugin = (providerId: string) => async (
           // Use while(true) loop to handle rate limits with backoff
           // This ensures we wait and retry when all accounts are rate-limited
           const quietMode = config.quiet_mode;
-          const toastScope = config.toast_scope;
 
-          // Helper to show toast without blocking on abort (respects quiet_mode and toast_scope)
+          // Helper to show toast without blocking on abort (respects quiet_mode)
           const showToast = async (message: string, variant: "info" | "warning" | "success" | "error") => {
             // Always log to debug regardless of toast filtering
-            log.debug("toast", { message, variant, isChildSession, toastScope });
+            log.debug("toast", { message, variant });
 
             if (quietMode) return;
             if (abortSignal?.aborted) return;
-
-            // Filter toasts for child sessions when toast_scope is "root_only".
-            // Uses the last-event heuristic globals (see the KNOWN LIMITATION note
-            // where they're declared) — per-request session correlation isn't
-            // available from the fetch interceptor.
-            if (toastScope === "root_only" && isChildSession) {
-              log.debug("toast-suppressed-child-session", { message, variant, parentID: childSessionParentID });
-              return;
-            }
             
             if (variant === "warning" && message.toLowerCase().includes("rate")) {
               if (!shouldShowRateLimitToast(message)) {
@@ -2353,7 +2153,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
             }
             const routingDecision = resolveHeaderRoutingDecision(urlString, family, config);
             const {
-              cliFirst,
               preferredHeaderStyle,
               explicitQuota,
               allowQuotaFallback,
@@ -2490,7 +2289,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   });
                 }
                 
-                const waitSecValue = Math.max(1, Math.ceil(softQuotaWaitMs / 1000));
                 pushDebug(`all-over-soft-quota family=${family} accounts=${accountCount} waitMs=${softQuotaWaitMs}`);
                 
                 if (!softQuotaToastShown) {
@@ -2950,7 +2748,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   }
 
                   const defaultRetryMs = (config.default_retry_after_seconds ?? 60) * 1000;
-                  const maxBackoffMs = (config.max_backoff_seconds ?? 60) * 1000;
                   const headerRetryMs = retryAfterMsFromResponse(response, defaultRetryMs);
                   const bodyInfo = await extractRetryInfoFromBody(response);
                   const serverRetryMs = bodyInfo.retryDelayMs ?? headerRetryMs;
@@ -3066,7 +2863,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   
                   // Only now do we call getRateLimitBackoff, which increments the global failure tracker
                   const quotaKey = headerStyleToQuotaKey(headerStyle, family);
-                  const { attempt, delayMs, isDuplicate } = getRateLimitBackoff(account.index, quotaKey, serverRetryMs);
+                  const { attempt, delayMs } = getRateLimitBackoff(account.index, quotaKey, serverRetryMs);
                   
                   // Calculate potential backoffs
                   const smartBackoffMs = calculateBackoffMs(rateLimitReason, account.consecutiveFailures ?? 0, serverRetryMs);
@@ -3097,8 +2894,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   await logResponseBody(debugContext, response, 429);
 
                   getHealthTracker().recordRateLimit(account.index);
-
-                  const accountLabel = account.email || `Account ${account.index + 1}`;
 
                   // Progressive retry for standard 429s: 1st 429 → 1s then switch (if enabled) or retry same
                   if (attempt === 1 && rateLimitReason !== "QUOTA_EXHAUSTED") {
@@ -3207,8 +3002,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   if (agySdkFallbackResponse && !isRetryableAgySdkCredentialStatus(agySdkFallbackResponse.status)) {
                     return agySdkFallbackResponse;
                   }
-
-                  const quotaName = headerStyle === "antigravity" ? "Antigravity" : "Gemini CLI";
 
                   if (accountCount > 1) {
                     const quotaMsg = bodyInfo.quotaResetTime 
@@ -3565,704 +3358,676 @@ export const createAntigravityPlugin = (providerId: string) => async (
         },
       };
     },
-    methods: [
-      {
-        label: "OAuth with Google (Antigravity)",
-        type: "oauth",
-        authorize: async (inputs?: Record<string, string>) => {
-          // CLI flow (`opencode auth login`) passes an inputs object.
-          if (inputs) {
-            const accounts: Array<Extract<AntigravityTokenExchangeResult, { type: "success" }>> = [];
-            const noBrowser = inputs.noBrowser === "true" || inputs["no-browser"] === "true";
-            const useManualMode = noBrowser || shouldSkipLocalServer();
+    // Interactive terminal flow of the account manager CLI (src/v2/cli.ts): add,
+    // re-authenticate, verify, enable/disable and delete accounts, check quotas.
+    login: async (inputs: Record<string, string> = {}): Promise<OAuthAuthorizationResult> => {
+      const accounts: Array<Extract<AntigravityTokenExchangeResult, { type: "success" }>> = [];
+      const noBrowser = inputs.noBrowser === "true" || inputs["no-browser"] === "true";
+      const useManualMode = noBrowser || shouldSkipLocalServer();
 
-            // Check for existing accounts and prompt user for login mode
-            let startFresh = true;
-            let refreshAccountIndex: number | undefined;
-            const existingStorage = await loadAccounts();
-            if (existingStorage && existingStorage.accounts.length > 0) {
-              let menuResult: LoginMenuResult;
-              while (true) {
-                const now = Date.now();
-                const existingAccounts = existingStorage.accounts.map((acc, idx) => {
-                  let status: 'active' | 'rate-limited' | 'expired' | 'verification-required' | 'unknown' = 'unknown';
+      // Check for existing accounts and prompt user for login mode
+      let startFresh = true;
+      let refreshAccountIndex: number | undefined;
+      const existingStorage = await loadAccounts();
+      if (existingStorage && existingStorage.accounts.length > 0) {
+        let menuResult: LoginMenuResult;
+        while (true) {
+          const now = Date.now();
+          const existingAccounts = existingStorage.accounts.map((acc, idx) => {
+            let status: 'active' | 'rate-limited' | 'expired' | 'verification-required' | 'unknown' = 'unknown';
 
-                  if (acc.verificationRequired) {
-                    status = 'verification-required';
-                  } else {
-                    const rateLimits = acc.rateLimitResetTimes;
-                    if (rateLimits) {
-                      const isRateLimited = Object.values(rateLimits).some(
-                        (resetTime) => typeof resetTime === 'number' && resetTime > now
-                      );
-                      if (isRateLimited) {
-                        status = 'rate-limited';
-                      } else {
-                        status = 'active';
-                      }
-                    } else {
-                      status = 'active';
-                    }
-
-                    if (acc.coolingDownUntil && acc.coolingDownUntil > now) {
-                      status = 'rate-limited';
-                    }
-                  }
-
-                  return {
-                    email: acc.email,
-                    index: idx,
-                    addedAt: acc.addedAt,
-                    lastUsed: acc.lastUsed,
-                    status,
-                    isCurrentAccount: idx === (existingStorage.activeIndex ?? 0),
-                    enabled: acc.enabled !== false,
-                  };
-                });
-                
-                menuResult = await promptLoginMode(existingAccounts);
-
-                if (menuResult.mode === "check") {
-                  console.log("\n📊 Checking quotas for all accounts...\n");
-                  const results = await checkAccountsQuota(existingStorage.accounts, client, providerId);
-                  let storageUpdated = false;
-                  
-                  for (const res of results) {
-                    const label = res.email || `Account ${res.index + 1}`;
-                    const disabledStr = res.disabled ? " (disabled)" : "";
-                    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-                    console.log(`  ${label}${disabledStr}`);
-                    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-                    
-                    if (res.status === "error") {
-                      console.log(`  ❌ Error: ${res.error}\n`);
-                      continue;
-                    }
-
-                    // ANSI color codes
-                    const colors = {
-                      red: '\x1b[31m',
-                      orange: '\x1b[33m',  // Yellow/orange
-                      green: '\x1b[32m',
-                      reset: '\x1b[0m',
-                    };
-
-                    // Get color based on remaining percentage
-                    const getColor = (remaining?: number): string => {
-                      if (typeof remaining !== 'number') return colors.reset;
-                      if (remaining < 0.2) return colors.red;
-                      if (remaining < 0.6) return colors.orange;
-                      return colors.green;
-                    };
-
-                    // Helper to create colored progress bar
-                    const createProgressBar = (remaining?: number, width: number = 20): string => {
-                      if (typeof remaining !== 'number') return '░'.repeat(width) + ' n/a';
-                      const filled = Math.round(remaining * width);
-                      const empty = width - filled;
-                      const color = getColor(remaining);
-                      const bar = `${color}${'█'.repeat(filled)}${colors.reset}${'░'.repeat(empty)}`;
-                      const pct = `${color}${Math.round(remaining * 100)}%${colors.reset}`.padStart(4 + color.length + colors.reset.length);
-                      return `${bar} ${pct}`;
-                    };
-
-                    // Helper to format reset time with days support
-                    const formatReset = (resetTime?: string): string => {
-                      if (!resetTime) return '';
-                      const ms = Date.parse(resetTime) - Date.now();
-                      if (ms <= 0) return ' (resetting...)';
-                      
-                      const hours = ms / (1000 * 60 * 60);
-                      if (hours >= 24) {
-                        const days = Math.floor(hours / 24);
-                        const remainingHours = Math.floor(hours % 24);
-                        if (remainingHours > 0) {
-                          return ` (resets in ${days}d ${remainingHours}h)`;
-                        }
-                        return ` (resets in ${days}d)`;
-                      }
-                      return ` (resets in ${formatWaitTime(ms)})`;
-                    };
-
-                    // Display Gemini CLI Quota first (as requested - swap order)
-                    const hasGeminiCli = res.geminiCliQuota && res.geminiCliQuota.models.length > 0;
-                    console.log(`\n  ┌─ Gemini CLI Quota`);
-                    if (!hasGeminiCli) {
-                      const errorMsg = res.geminiCliQuota?.error || "No Gemini CLI quota available";
-                      console.log(`  │  └─ ${errorMsg}`);
-                    } else {
-                      const models = res.geminiCliQuota!.models;
-                      models.forEach((model, idx) => {
-                        const isLast = idx === models.length - 1;
-                        const connector = isLast ? "└─" : "├─";
-                        const bar = createProgressBar(model.remainingFraction);
-                        const reset = formatReset(model.resetTime);
-                        const modelName = model.modelId.padEnd(29);
-                        console.log(`  │  ${connector} ${modelName} ${bar}${reset}`);
-                      });
-                    }
-
-                    // Display Antigravity Quota second
-                    const hasAntigravity = res.quota && Object.keys(res.quota.groups).length > 0;
-                    console.log(`  │`);
-                    console.log(`  └─ Antigravity Quota`);
-                    if (!hasAntigravity) {
-                      const errorMsg = res.quota?.error || "No quota information available";
-                      console.log(`     └─ ${errorMsg}`);
-                    } else {
-                      const groups = res.quota!.groups;
-                      // Antigravity meters Gemini quota per family (one shared Pro
-                      // bucket, one shared Flash bucket) — not per model version —
-                      // so we label by family rather than naming an arbitrary
-                      // variant the API happens to return first.
-                      const groupEntries = [
-                        { name: "Claude", data: groups.claude },
-                        { name: "Gemini Pro", data: groups["gemini-pro"] },
-                        { name: "Gemini Flash", data: groups["gemini-flash"] },
-                      ].filter(g => g.data);
-
-                      groupEntries.forEach((g, idx) => {
-                        const isLast = idx === groupEntries.length - 1;
-                        const connector = isLast ? "└─" : "├─";
-                        // When the backend reported no numeric fraction, pass
-                        // undefined so the bar renders "n/a" instead of a
-                        // misleading 0%.
-                        const fraction = g.data!.remainingFractionReported
-                          ? g.data!.remainingFraction
-                          : undefined;
-                        const bar = createProgressBar(fraction);
-                        const reset = formatReset(g.data!.resetTime);
-                        const modelName = g.name.padEnd(29);
-                        console.log(`     ${connector} ${modelName} ${bar}${reset}`);
-                      });
-                    }
-                    console.log("");
-
-                    // Cache quota data for soft quota protection
-                    if (res.quota?.groups) {
-                      const acc = existingStorage.accounts[res.index];
-                      if (acc) {
-                        acc.cachedQuota = res.quota.groups;
-                        acc.cachedQuotaUpdatedAt = Date.now();
-                        storageUpdated = true;
-                      }
-                    }
-
-                    if (res.updatedAccount) {
-                      existingStorage.accounts[res.index] = {
-                        ...res.updatedAccount,
-                        cachedQuota: res.quota?.groups,
-                        cachedQuotaUpdatedAt: Date.now(),
-                      };
-                      storageUpdated = true;
-                    }
-                  }
-                  if (storageUpdated) {
-                    await saveAccounts(existingStorage);
-                  }
-                  console.log("");
-
-                  // Pause so the user can read the quota output before the
-                  // menu re-renders with clearScreen and wipes it.
-                  await pressEnterToContinue();
-                  continue;
-                }
-
-                if (menuResult.mode === "manage") {
-                  if (menuResult.toggleAccountIndex !== undefined) {
-                    const acc = existingStorage.accounts[menuResult.toggleAccountIndex];
-                    if (acc) {
-                      acc.enabled = acc.enabled === false;
-                      await saveAccounts(existingStorage);
-                      activeAccountManager?.setAccountEnabled(menuResult.toggleAccountIndex, acc.enabled);
-                      console.log(`\nAccount ${acc.email || menuResult.toggleAccountIndex + 1} ${acc.enabled ? 'enabled' : 'disabled'}.\n`);
-                      await pressEnterToContinue();
-                    }
-                  }
-                  continue;
-                }
-
-                if (menuResult.mode === "verify" || menuResult.mode === "verify-all") {
-                  const verifyAll = menuResult.mode === "verify-all" || menuResult.verifyAll === true;
-
-                  if (verifyAll) {
-                    if (existingStorage.accounts.length === 0) {
-                      console.log("\nNo accounts available to verify.\n");
-                      await pressEnterToContinue();
-                      continue;
-                    }
-
-                    console.log(`\nChecking verification status for ${existingStorage.accounts.length} account(s)...\n`);
-
-                    let okCount = 0;
-                    let blockedCount = 0;
-                    let errorCount = 0;
-                    let storageUpdated = false;
-
-                    const blockedResults: Array<{ label: string; message: string; verifyUrl?: string }> = [];
-
-                    for (let i = 0; i < existingStorage.accounts.length; i++) {
-                      const account = existingStorage.accounts[i];
-                      if (!account) continue;
-
-                      const label = account.email || `Account ${i + 1}`;
-                      process.stdout.write(`- [${i + 1}/${existingStorage.accounts.length}] ${label} ... `);
-
-                      const verification = await verifyAccountAccess(account, client, providerId);
-                      if (verification.status === "ok") {
-                        const { changed, wasVerificationRequired } = clearStoredAccountVerificationRequired(account, true);
-                        if (changed) {
-                          storageUpdated = true;
-                        }
-                        activeAccountManager?.clearAccountVerificationRequired(i, wasVerificationRequired);
-                        okCount += 1;
-                        console.log("ok");
-                        continue;
-                      }
-
-                      if (verification.status === "blocked") {
-                        const changed = markStoredAccountVerificationRequired(
-                          account,
-                          verification.message,
-                          verification.verifyUrl,
-                        );
-                        if (changed) {
-                          storageUpdated = true;
-                        }
-                        activeAccountManager?.markAccountVerificationRequired(i, verification.message, verification.verifyUrl);
-
-                        blockedCount += 1;
-                        console.log("needs verification");
-                        const verifyUrl = verification.verifyUrl ?? account.verificationUrl;
-                        blockedResults.push({
-                          label,
-                          message: verification.message,
-                          verifyUrl,
-                        });
-                        continue;
-                      }
-
-                      errorCount += 1;
-                      console.log(`error (${verification.message})`);
-                    }
-
-                    if (storageUpdated) {
-                      await saveAccounts(existingStorage);
-                    }
-
-                    console.log(`\nVerification summary: ${okCount} ready, ${blockedCount} need verification, ${errorCount} errors.`);
-
-                    if (blockedResults.length > 0) {
-                      console.log("\nAccounts needing verification:");
-                      for (const result of blockedResults) {
-                        console.log(`\n- ${result.label}`);
-                        console.log(`  ${result.message}`);
-                        if (result.verifyUrl) {
-                          console.log(`  URL: ${result.verifyUrl}`);
-                        } else {
-                          console.log("  URL: not provided by API response");
-                        }
-                      }
-                      console.log("");
-                    } else {
-                      console.log("");
-                    }
-
-                    await pressEnterToContinue();
-                    continue;
-                  }
-
-                  let verifyAccountIndex = menuResult.verifyAccountIndex;
-                  if (verifyAccountIndex === undefined) {
-                    verifyAccountIndex = await promptAccountIndexForVerification(existingAccounts);
-                  }
-
-                  if (verifyAccountIndex === undefined) {
-                    console.log("\nVerification cancelled.\n");
-                    await pressEnterToContinue();
-                    continue;
-                  }
-
-                  const account = existingStorage.accounts[verifyAccountIndex];
-                  if (!account) {
-                    console.log(`\nAccount ${verifyAccountIndex + 1} not found.\n`);
-                    await pressEnterToContinue();
-                    continue;
-                  }
-
-                  const label = account.email || `Account ${verifyAccountIndex + 1}`;
-                  console.log(`\nChecking verification status for ${label}...\n`);
-
-                  const verification = await verifyAccountAccess(account, client, providerId);
-
-                  if (verification.status === "ok") {
-                    const { changed, wasVerificationRequired } = clearStoredAccountVerificationRequired(account, true);
-                    if (changed) {
-                      await saveAccounts(existingStorage);
-                    }
-                    activeAccountManager?.clearAccountVerificationRequired(verifyAccountIndex, wasVerificationRequired);
-
-                    if (wasVerificationRequired) {
-                      console.log(`✓ ${label} is ready for requests and has been re-enabled.\n`);
-                    } else {
-                      console.log(`✓ ${label} is ready for requests.\n`);
-                    }
-                    await pressEnterToContinue();
-                    continue;
-                  }
-
-                  if (verification.status === "blocked") {
-                    const changed = markStoredAccountVerificationRequired(
-                      account,
-                      verification.message,
-                      verification.verifyUrl,
-                    );
-                    if (changed) {
-                      await saveAccounts(existingStorage);
-                    }
-                    activeAccountManager?.markAccountVerificationRequired(
-                      verifyAccountIndex,
-                      verification.message,
-                      verification.verifyUrl,
-                    );
-
-                    const verifyUrl = verification.verifyUrl ?? account.verificationUrl;
-                    console.log(`⚠ ${label} needs Google verification before it can be used.`);
-                    if (verification.message) {
-                      console.log(verification.message);
-                    }
-                    console.log(`${label} has been disabled until verification is completed.`);
-                    if (verifyUrl) {
-                      console.log(`\nVerification URL:\n${verifyUrl}\n`);
-                      if (await promptOpenVerificationUrl()) {
-                        const opened = await openBrowser(verifyUrl);
-                        if (opened) {
-                          console.log("Opened verification URL in your browser.\n");
-                        } else {
-                          console.log("Could not open browser automatically. Please open the URL manually.\n");
-                        }
-                      }
-                    } else {
-                      console.log("No verification URL was returned. Try re-authenticating this account.\n");
-                    }
-                    await pressEnterToContinue();
-                    continue;
-                  }
-
-                  console.log(`✗ ${label}: ${verification.message}\n`);
-                  await pressEnterToContinue();
-                  continue;
-                }
-
-                break;
-              }
-              
-              if (menuResult.mode === "cancel") {
-                return {
-                  url: "",
-                  instructions: "Authentication cancelled",
-                  method: "auto",
-                  callback: async () => ({ type: "failed", error: "Authentication cancelled" }),
-                };
-              }
-              
-              if (menuResult.deleteAccountIndex !== undefined) {
-                const deletedAccount = existingStorage.accounts[menuResult.deleteAccountIndex];
-                const updatedAccounts = existingStorage.accounts.filter(
-                  (_, idx) => idx !== menuResult.deleteAccountIndex
+            if (acc.verificationRequired) {
+              status = 'verification-required';
+            } else {
+              const rateLimits = acc.rateLimitResetTimes;
+              if (rateLimits) {
+                const isRateLimited = Object.values(rateLimits).some(
+                  (resetTime) => typeof resetTime === 'number' && resetTime > now
                 );
-                if (deletedAccount) {
-                  await removeAccountFromStorage(deletedAccount.refreshToken);
-                }
-                // Sync in-memory state so deleted account stops being used immediately
-                const removedFromPool = activeAccountManager?.removeAccountByIndex(menuResult.deleteAccountIndex);
-                if (removedFromPool) {
-                  // Renumbering shifted subsequent account indices down by one —
-                  // remap index-keyed module state to keep it attached correctly.
-                  remapAccountStateAfterRemoval(menuResult.deleteAccountIndex);
-                }
-                console.log("\nAccount deleted.\n");
-
-                if (updatedAccounts.length > 0) {
-                  const fallbackAccount = updatedAccounts[0];
-                  if (fallbackAccount?.refreshToken) {
-                    const fallbackResult = buildAuthSuccessFromStoredAccount(fallbackAccount);
-                    try {
-                      await client.auth.set({
-                        path: { id: providerId },
-                        body: { type: "oauth", refresh: fallbackResult.refresh, access: "", expires: 0 },
-                      });
-                    } catch (storeError) {
-                      log.error("Failed to update stored Antigravity OAuth credentials", { error: String(storeError) });
-                    }
-
-                    const label = fallbackAccount.email || `Account ${1}`;
-                    return {
-                      url: "",
-                      instructions: `Account deleted. Using ${label} for future requests.`,
-                      method: "auto",
-                      callback: async () => fallbackResult,
-                    };
-                  }
-                }
-
-                try {
-                  await client.auth.set({
-                    path: { id: providerId },
-                    body: { type: "oauth", refresh: "", access: "", expires: 0 },
-                  });
-                } catch (storeError) {
-                  log.error("Failed to clear stored Antigravity OAuth credentials", { error: String(storeError) });
-                }
-
-                return {
-                  url: "",
-                  instructions: "All accounts deleted. Run `opencode auth login` to reauthenticate.",
-                  method: "auto",
-                  callback: async () => ({
-                    type: "failed",
-                    error: "All accounts deleted. Reauthentication required.",
-                  }),
-                };
-              }
-
-              if (menuResult.refreshAccountIndex !== undefined) {
-                refreshAccountIndex = menuResult.refreshAccountIndex;
-                const refreshEmail = existingStorage.accounts[refreshAccountIndex]?.email;
-                console.log(`\nRe-authenticating ${refreshEmail || 'account'}...\n`);
-                startFresh = false;
-              }
-              
-              if (menuResult.deleteAll) {
-                await clearAccounts();
-                console.log("\nAll accounts deleted.\n");
-                startFresh = true;
-                try {
-                  await client.auth.set({
-                    path: { id: providerId },
-                    body: { type: "oauth", refresh: "", access: "", expires: 0 },
-                  });
-                } catch (storeError) {
-                  log.error("Failed to clear stored Antigravity OAuth credentials", { error: String(storeError) });
+                if (isRateLimited) {
+                  status = 'rate-limited';
+                } else {
+                  status = 'active';
                 }
               } else {
-                startFresh = menuResult.mode === "fresh";
+                status = 'active';
               }
-              
-              if (startFresh && !menuResult.deleteAll) {
-                console.log("\nStarting fresh - existing accounts will be replaced.\n");
-              } else if (!startFresh) {
-                console.log("\nAdding to existing accounts.\n");
+
+              if (acc.coolingDownUntil && acc.coolingDownUntil > now) {
+                status = 'rate-limited';
               }
             }
-
-            while (accounts.length < MAX_OAUTH_ACCOUNTS) {
-              console.log(`\n=== Antigravity OAuth (Account ${accounts.length + 1}) ===`);
-
-              const projectId = await promptProjectId();
-
-              const result = await (async (): Promise<AntigravityTokenExchangeResult> => {
-                const authorization = await authorizeAntigravity(projectId);
-                const fallbackState = getStateFromAuthorizationUrl(authorization.url);
-
-                console.log("\nOAuth URL:\n" + authorization.url + "\n");
-
-                if (useManualMode) {
-                  const browserOpened = await openBrowser(authorization.url);
-                  if (!browserOpened) {
-                    console.log("Could not open browser automatically.");
-                    console.log("Please open the URL above manually in your local browser.\n");
-                  }
-                  return promptManualOAuthInput(fallbackState);
-                }
-
-                let listener: OAuthListener | null = null;
-                if (!isHeadlessEnvironment()) {
-                  try {
-                    listener = await startOAuthListener();
-                  } catch {
-                    listener = null;
-                  }
-                }
-
-                if (!isHeadlessEnvironment()) {
-                  await openBrowser(authorization.url);
-                }
-
-                if (listener) {
-                  try {
-                    const SOFT_TIMEOUT_MS = 30000;
-                    const callbackPromise = listener.waitForCallback();
-                    const timeoutPromise = new Promise<never>((_, reject) =>
-                      setTimeout(() => reject(new Error("SOFT_TIMEOUT")), SOFT_TIMEOUT_MS)
-                    );
-
-                    let callbackUrl: URL;
-                    try {
-                      callbackUrl = await Promise.race([callbackPromise, timeoutPromise]);
-                    } catch (err) {
-                      if (err instanceof Error && err.message === "SOFT_TIMEOUT") {
-                        console.log("\n⏳ Automatic callback not received after 30 seconds.");
-                        console.log("You can paste the redirect URL manually.\n");
-                        console.log("OAuth URL (in case you need it again):");
-                        console.log(authorization.url + "\n");
-                        
-                        try {
-                          await listener.close();
-                        } catch {}
-                        
-                        return promptManualOAuthInput(fallbackState);
-                      }
-                      throw err;
-                    }
-
-                    const params = extractOAuthCallbackParams(callbackUrl);
-                    if (!params) {
-                      return { type: "failed", error: "Missing code or state in callback URL" };
-                    }
-
-                    return exchangeAntigravity(params.code, params.state);
-                  } catch (error) {
-                    if (error instanceof Error && error.message !== "SOFT_TIMEOUT") {
-                      return {
-                        type: "failed",
-                        error: error.message,
-                      };
-                    }
-                    return {
-                      type: "failed",
-                      error: error instanceof Error ? error.message : "Unknown error",
-                    };
-                  } finally {
-                    try {
-                      await listener.close();
-                    } catch {}
-                  }
-                }
-
-                return promptManualOAuthInput(fallbackState);
-              })();
-
-              if (result.type === "failed") {
-                if (accounts.length === 0) {
-                  return {
-                    url: "",
-                    instructions: `Authentication failed: ${result.error}`,
-                    method: "auto",
-                    callback: async () => result,
-                  };
-                }
-
-                console.warn(
-                  `[opencode-antigravity-auth] Skipping failed account ${accounts.length + 1}: ${result.error}`,
-                );
-                break;
-              }
-
-              accounts.push(result);
-
-              try {
-                await client.tui.showToast({
-                  body: {
-                    message: `Account ${accounts.length} authenticated${result.email ? ` (${result.email})` : ""}`,
-                    variant: "success",
-                  },
-                });
-              } catch {
-              }
-
-              try {
-                if (refreshAccountIndex !== undefined) {
-                  await replaceStoredAccount(refreshAccountIndex, result);
-                } else {
-                  const isFirstAccount = accounts.length === 1;
-                  await persistAccountPool([result], isFirstAccount && startFresh);
-                }
-              } catch {
-              }
-
-              if (refreshAccountIndex !== undefined) {
-                break;
-              }
-
-              if (accounts.length >= MAX_OAUTH_ACCOUNTS) {
-                break;
-              }
-
-              // Get the actual deduplicated account count from storage for the prompt
-              let currentAccountCount = accounts.length;
-              try {
-                const currentStorage = await loadAccounts();
-                if (currentStorage) {
-                  currentAccountCount = currentStorage.accounts.length;
-                }
-              } catch {
-                // Fall back to accounts.length if we can't read storage
-              }
-
-              const addAnother = await promptAddAnotherAccount(currentAccountCount);
-              if (!addAnother) {
-                break;
-              }
-            }
-
-            const primary = accounts[0];
-            if (!primary) {
-              return {
-                url: "",
-                instructions: "Authentication cancelled",
-                method: "auto",
-                callback: async () => ({ type: "failed", error: "Authentication cancelled" }),
-              };
-            }
-
-            let actualAccountCount = accounts.length;
-            try {
-              const finalStorage = await loadAccounts();
-              if (finalStorage) {
-                actualAccountCount = finalStorage.accounts.length;
-              }
-            } catch {
-            }
-
-            const successMessage = refreshAccountIndex !== undefined
-              ? `Token refreshed successfully.`
-              : `Multi-account setup complete (${actualAccountCount} account(s)).`;
 
             return {
+              email: acc.email,
+              index: idx,
+              addedAt: acc.addedAt,
+              lastUsed: acc.lastUsed,
+              status,
+              isCurrentAccount: idx === (existingStorage.activeIndex ?? 0),
+              enabled: acc.enabled !== false,
+            };
+          });
+          
+          menuResult = await promptLoginMode(existingAccounts);
+
+          if (menuResult.mode === "check") {
+            console.log("\n📊 Checking quotas for all accounts...\n");
+            const results = await checkAccountsQuota(existingStorage.accounts, client, providerId);
+            let storageUpdated = false;
+            
+            for (const res of results) {
+              const label = res.email || `Account ${res.index + 1}`;
+              const disabledStr = res.disabled ? " (disabled)" : "";
+              console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+              console.log(`  ${label}${disabledStr}`);
+              console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+              
+              if (res.status === "error") {
+                console.log(`  ❌ Error: ${res.error}\n`);
+                continue;
+              }
+
+              // ANSI color codes
+              const colors = {
+                red: '\x1b[31m',
+                orange: '\x1b[33m',  // Yellow/orange
+                green: '\x1b[32m',
+                reset: '\x1b[0m',
+              };
+
+              // Get color based on remaining percentage
+              const getColor = (remaining?: number): string => {
+                if (typeof remaining !== 'number') return colors.reset;
+                if (remaining < 0.2) return colors.red;
+                if (remaining < 0.6) return colors.orange;
+                return colors.green;
+              };
+
+              // Helper to create colored progress bar
+              const createProgressBar = (remaining?: number, width: number = 20): string => {
+                if (typeof remaining !== 'number') return '░'.repeat(width) + ' n/a';
+                const filled = Math.round(remaining * width);
+                const empty = width - filled;
+                const color = getColor(remaining);
+                const bar = `${color}${'█'.repeat(filled)}${colors.reset}${'░'.repeat(empty)}`;
+                const pct = `${color}${Math.round(remaining * 100)}%${colors.reset}`.padStart(4 + color.length + colors.reset.length);
+                return `${bar} ${pct}`;
+              };
+
+              // Helper to format reset time with days support
+              const formatReset = (resetTime?: string): string => {
+                if (!resetTime) return '';
+                const ms = Date.parse(resetTime) - Date.now();
+                if (ms <= 0) return ' (resetting...)';
+                
+                const hours = ms / (1000 * 60 * 60);
+                if (hours >= 24) {
+                  const days = Math.floor(hours / 24);
+                  const remainingHours = Math.floor(hours % 24);
+                  if (remainingHours > 0) {
+                    return ` (resets in ${days}d ${remainingHours}h)`;
+                  }
+                  return ` (resets in ${days}d)`;
+                }
+                return ` (resets in ${formatWaitTime(ms)})`;
+              };
+
+              // Display Gemini CLI Quota first (as requested - swap order)
+              const hasGeminiCli = res.geminiCliQuota && res.geminiCliQuota.models.length > 0;
+              console.log(`\n  ┌─ Gemini CLI Quota`);
+              if (!hasGeminiCli) {
+                const errorMsg = res.geminiCliQuota?.error || "No Gemini CLI quota available";
+                console.log(`  │  └─ ${errorMsg}`);
+              } else {
+                const models = res.geminiCliQuota!.models;
+                models.forEach((model, idx) => {
+                  const isLast = idx === models.length - 1;
+                  const connector = isLast ? "└─" : "├─";
+                  const bar = createProgressBar(model.remainingFraction);
+                  const reset = formatReset(model.resetTime);
+                  const modelName = model.modelId.padEnd(29);
+                  console.log(`  │  ${connector} ${modelName} ${bar}${reset}`);
+                });
+              }
+
+              // Display Antigravity Quota second
+              const hasAntigravity = res.quota && Object.keys(res.quota.groups).length > 0;
+              console.log(`  │`);
+              console.log(`  └─ Antigravity Quota`);
+              if (!hasAntigravity) {
+                const errorMsg = res.quota?.error || "No quota information available";
+                console.log(`     └─ ${errorMsg}`);
+              } else {
+                const groups = res.quota!.groups;
+                // Antigravity meters Gemini quota per family (one shared Pro
+                // bucket, one shared Flash bucket) — not per model version —
+                // so we label by family rather than naming an arbitrary
+                // variant the API happens to return first.
+                const groupEntries = [
+                  { name: "Claude", data: groups.claude },
+                  { name: "Gemini Pro", data: groups["gemini-pro"] },
+                  { name: "Gemini Flash", data: groups["gemini-flash"] },
+                ].filter(g => g.data);
+
+                groupEntries.forEach((g, idx) => {
+                  const isLast = idx === groupEntries.length - 1;
+                  const connector = isLast ? "└─" : "├─";
+                  // When the backend reported no numeric fraction, pass
+                  // undefined so the bar renders "n/a" instead of a
+                  // misleading 0%.
+                  const fraction = g.data!.remainingFractionReported
+                    ? g.data!.remainingFraction
+                    : undefined;
+                  const bar = createProgressBar(fraction);
+                  const reset = formatReset(g.data!.resetTime);
+                  const modelName = g.name.padEnd(29);
+                  console.log(`     ${connector} ${modelName} ${bar}${reset}`);
+                });
+              }
+              console.log("");
+
+              // Cache quota data for soft quota protection
+              if (res.quota?.groups) {
+                const acc = existingStorage.accounts[res.index];
+                if (acc) {
+                  acc.cachedQuota = res.quota.groups;
+                  acc.cachedQuotaUpdatedAt = Date.now();
+                  storageUpdated = true;
+                }
+              }
+
+              if (res.updatedAccount) {
+                existingStorage.accounts[res.index] = {
+                  ...res.updatedAccount,
+                  cachedQuota: res.quota?.groups,
+                  cachedQuotaUpdatedAt: Date.now(),
+                };
+                storageUpdated = true;
+              }
+            }
+            if (storageUpdated) {
+              await saveAccounts(existingStorage);
+            }
+            console.log("");
+
+            // Pause so the user can read the quota output before the
+            // menu re-renders with clearScreen and wipes it.
+            await pressEnterToContinue();
+            continue;
+          }
+
+          if (menuResult.mode === "manage") {
+            if (menuResult.toggleAccountIndex !== undefined) {
+              const acc = existingStorage.accounts[menuResult.toggleAccountIndex];
+              if (acc) {
+                acc.enabled = acc.enabled === false;
+                await saveAccounts(existingStorage);
+                activeAccountManager?.setAccountEnabled(menuResult.toggleAccountIndex, acc.enabled);
+                console.log(`\nAccount ${acc.email || menuResult.toggleAccountIndex + 1} ${acc.enabled ? 'enabled' : 'disabled'}.\n`);
+                await pressEnterToContinue();
+              }
+            }
+            continue;
+          }
+
+          if (menuResult.mode === "verify" || menuResult.mode === "verify-all") {
+            const verifyAll = menuResult.mode === "verify-all" || menuResult.verifyAll === true;
+
+            if (verifyAll) {
+              if (existingStorage.accounts.length === 0) {
+                console.log("\nNo accounts available to verify.\n");
+                await pressEnterToContinue();
+                continue;
+              }
+
+              console.log(`\nChecking verification status for ${existingStorage.accounts.length} account(s)...\n`);
+
+              let okCount = 0;
+              let blockedCount = 0;
+              let errorCount = 0;
+              let storageUpdated = false;
+
+              const blockedResults: Array<{ label: string; message: string; verifyUrl?: string }> = [];
+
+              for (let i = 0; i < existingStorage.accounts.length; i++) {
+                const account = existingStorage.accounts[i];
+                if (!account) continue;
+
+                const label = account.email || `Account ${i + 1}`;
+                process.stdout.write(`- [${i + 1}/${existingStorage.accounts.length}] ${label} ... `);
+
+                const verification = await verifyAccountAccess(account, client, providerId);
+                if (verification.status === "ok") {
+                  const { changed, wasVerificationRequired } = clearStoredAccountVerificationRequired(account, true);
+                  if (changed) {
+                    storageUpdated = true;
+                  }
+                  activeAccountManager?.clearAccountVerificationRequired(i, wasVerificationRequired);
+                  okCount += 1;
+                  console.log("ok");
+                  continue;
+                }
+
+                if (verification.status === "blocked") {
+                  const changed = markStoredAccountVerificationRequired(
+                    account,
+                    verification.message,
+                    verification.verifyUrl,
+                  );
+                  if (changed) {
+                    storageUpdated = true;
+                  }
+                  activeAccountManager?.markAccountVerificationRequired(i, verification.message, verification.verifyUrl);
+
+                  blockedCount += 1;
+                  console.log("needs verification");
+                  const verifyUrl = verification.verifyUrl ?? account.verificationUrl;
+                  blockedResults.push({
+                    label,
+                    message: verification.message,
+                    verifyUrl,
+                  });
+                  continue;
+                }
+
+                errorCount += 1;
+                console.log(`error (${verification.message})`);
+              }
+
+              if (storageUpdated) {
+                await saveAccounts(existingStorage);
+              }
+
+              console.log(`\nVerification summary: ${okCount} ready, ${blockedCount} need verification, ${errorCount} errors.`);
+
+              if (blockedResults.length > 0) {
+                console.log("\nAccounts needing verification:");
+                for (const result of blockedResults) {
+                  console.log(`\n- ${result.label}`);
+                  console.log(`  ${result.message}`);
+                  if (result.verifyUrl) {
+                    console.log(`  URL: ${result.verifyUrl}`);
+                  } else {
+                    console.log("  URL: not provided by API response");
+                  }
+                }
+                console.log("");
+              } else {
+                console.log("");
+              }
+
+              await pressEnterToContinue();
+              continue;
+            }
+
+            let verifyAccountIndex = menuResult.verifyAccountIndex;
+            if (verifyAccountIndex === undefined) {
+              verifyAccountIndex = await promptAccountIndexForVerification(existingAccounts);
+            }
+
+            if (verifyAccountIndex === undefined) {
+              console.log("\nVerification cancelled.\n");
+              await pressEnterToContinue();
+              continue;
+            }
+
+            const account = existingStorage.accounts[verifyAccountIndex];
+            if (!account) {
+              console.log(`\nAccount ${verifyAccountIndex + 1} not found.\n`);
+              await pressEnterToContinue();
+              continue;
+            }
+
+            const label = account.email || `Account ${verifyAccountIndex + 1}`;
+            console.log(`\nChecking verification status for ${label}...\n`);
+
+            const verification = await verifyAccountAccess(account, client, providerId);
+
+            if (verification.status === "ok") {
+              const { changed, wasVerificationRequired } = clearStoredAccountVerificationRequired(account, true);
+              if (changed) {
+                await saveAccounts(existingStorage);
+              }
+              activeAccountManager?.clearAccountVerificationRequired(verifyAccountIndex, wasVerificationRequired);
+
+              if (wasVerificationRequired) {
+                console.log(`✓ ${label} is ready for requests and has been re-enabled.\n`);
+              } else {
+                console.log(`✓ ${label} is ready for requests.\n`);
+              }
+              await pressEnterToContinue();
+              continue;
+            }
+
+            if (verification.status === "blocked") {
+              const changed = markStoredAccountVerificationRequired(
+                account,
+                verification.message,
+                verification.verifyUrl,
+              );
+              if (changed) {
+                await saveAccounts(existingStorage);
+              }
+              activeAccountManager?.markAccountVerificationRequired(
+                verifyAccountIndex,
+                verification.message,
+                verification.verifyUrl,
+              );
+
+              const verifyUrl = verification.verifyUrl ?? account.verificationUrl;
+              console.log(`⚠ ${label} needs Google verification before it can be used.`);
+              if (verification.message) {
+                console.log(verification.message);
+              }
+              console.log(`${label} has been disabled until verification is completed.`);
+              if (verifyUrl) {
+                console.log(`\nVerification URL:\n${verifyUrl}\n`);
+                if (await promptOpenVerificationUrl()) {
+                  const opened = await openBrowser(verifyUrl);
+                  if (opened) {
+                    console.log("Opened verification URL in your browser.\n");
+                  } else {
+                    console.log("Could not open browser automatically. Please open the URL manually.\n");
+                  }
+                }
+              } else {
+                console.log("No verification URL was returned. Try re-authenticating this account.\n");
+              }
+              await pressEnterToContinue();
+              continue;
+            }
+
+            console.log(`✗ ${label}: ${verification.message}\n`);
+            await pressEnterToContinue();
+            continue;
+          }
+
+          break;
+        }
+        
+        if (menuResult.mode === "cancel") {
+          return {
+            url: "",
+            instructions: "Authentication cancelled",
+            method: "auto",
+            callback: async () => ({ type: "failed", error: "Authentication cancelled" }),
+          };
+        }
+        
+        if (menuResult.deleteAccountIndex !== undefined) {
+          const deletedAccount = existingStorage.accounts[menuResult.deleteAccountIndex];
+          const updatedAccounts = existingStorage.accounts.filter(
+            (_, idx) => idx !== menuResult.deleteAccountIndex
+          );
+          if (deletedAccount) {
+            await removeAccountFromStorage(deletedAccount.refreshToken);
+          }
+          // Sync in-memory state so deleted account stops being used immediately
+          const removedFromPool = activeAccountManager?.removeAccountByIndex(menuResult.deleteAccountIndex);
+          if (removedFromPool) {
+            // Renumbering shifted subsequent account indices down by one —
+            // remap index-keyed module state to keep it attached correctly.
+            remapAccountStateAfterRemoval(menuResult.deleteAccountIndex);
+          }
+          console.log("\nAccount deleted.\n");
+
+          if (updatedAccounts.length > 0) {
+            const fallbackAccount = updatedAccounts[0];
+            if (fallbackAccount?.refreshToken) {
+              const fallbackResult = buildAuthSuccessFromStoredAccount(fallbackAccount);
+              try {
+                await client.auth.set({
+                  path: { id: providerId },
+                  body: { type: "oauth", refresh: fallbackResult.refresh, access: "", expires: 0 },
+                });
+              } catch (storeError) {
+                log.error("Failed to update stored Antigravity OAuth credentials", { error: String(storeError) });
+              }
+
+              const label = fallbackAccount.email || `Account ${1}`;
+              return {
+                url: "",
+                instructions: `Account deleted. Using ${label} for future requests.`,
+                method: "auto",
+                callback: async () => fallbackResult,
+              };
+            }
+          }
+
+          try {
+            await client.auth.set({
+              path: { id: providerId },
+              body: { type: "oauth", refresh: "", access: "", expires: 0 },
+            });
+          } catch (storeError) {
+            log.error("Failed to clear stored Antigravity OAuth credentials", { error: String(storeError) });
+          }
+
+          return {
+            url: "",
+            instructions: "All accounts deleted. Run `opencode auth login` to reauthenticate.",
+            method: "auto",
+            callback: async () => ({
+              type: "failed",
+              error: "All accounts deleted. Reauthentication required.",
+            }),
+          };
+        }
+
+        if (menuResult.refreshAccountIndex !== undefined) {
+          refreshAccountIndex = menuResult.refreshAccountIndex;
+          const refreshEmail = existingStorage.accounts[refreshAccountIndex]?.email;
+          console.log(`\nRe-authenticating ${refreshEmail || 'account'}...\n`);
+          startFresh = false;
+        }
+        
+        if (menuResult.deleteAll) {
+          await clearAccounts();
+          console.log("\nAll accounts deleted.\n");
+          startFresh = true;
+          try {
+            await client.auth.set({
+              path: { id: providerId },
+              body: { type: "oauth", refresh: "", access: "", expires: 0 },
+            });
+          } catch (storeError) {
+            log.error("Failed to clear stored Antigravity OAuth credentials", { error: String(storeError) });
+          }
+        } else {
+          startFresh = menuResult.mode === "fresh";
+        }
+        
+        if (startFresh && !menuResult.deleteAll) {
+          console.log("\nStarting fresh - existing accounts will be replaced.\n");
+        } else if (!startFresh) {
+          console.log("\nAdding to existing accounts.\n");
+        }
+      }
+
+      while (accounts.length < MAX_OAUTH_ACCOUNTS) {
+        console.log(`\n=== Antigravity OAuth (Account ${accounts.length + 1}) ===`);
+
+        const projectId = await promptProjectId();
+
+        const result = await (async (): Promise<AntigravityTokenExchangeResult> => {
+          const authorization = await authorizeAntigravity(projectId);
+          const fallbackState = getStateFromAuthorizationUrl(authorization.url);
+
+          console.log("\nOAuth URL:\n" + authorization.url + "\n");
+
+          if (useManualMode) {
+            const browserOpened = await openBrowser(authorization.url);
+            if (!browserOpened) {
+              console.log("Could not open browser automatically.");
+              console.log("Please open the URL above manually in your local browser.\n");
+            }
+            return promptManualOAuthInput(fallbackState);
+          }
+
+          let listener: OAuthListener | null = null;
+          if (!isHeadlessEnvironment()) {
+            try {
+              listener = await startOAuthListener();
+            } catch {
+              listener = null;
+            }
+          }
+
+          if (!isHeadlessEnvironment()) {
+            await openBrowser(authorization.url);
+          }
+
+          if (listener) {
+            try {
+              const SOFT_TIMEOUT_MS = 30000;
+              const callbackPromise = listener.waitForCallback();
+              const timeoutPromise = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("SOFT_TIMEOUT")), SOFT_TIMEOUT_MS)
+              );
+
+              let callbackUrl: URL;
+              try {
+                callbackUrl = await Promise.race([callbackPromise, timeoutPromise]);
+              } catch (err) {
+                if (err instanceof Error && err.message === "SOFT_TIMEOUT") {
+                  console.log("\n⏳ Automatic callback not received after 30 seconds.");
+                  console.log("You can paste the redirect URL manually.\n");
+                  console.log("OAuth URL (in case you need it again):");
+                  console.log(authorization.url + "\n");
+                  
+                  try {
+                    await listener.close();
+                  } catch {}
+                  
+                  return promptManualOAuthInput(fallbackState);
+                }
+                throw err;
+              }
+
+              const params = extractOAuthCallbackParams(callbackUrl);
+              if (!params) {
+                return { type: "failed", error: "Missing code or state in callback URL" };
+              }
+
+              return exchangeAntigravity(params.code, params.state);
+            } catch (error) {
+              if (error instanceof Error && error.message !== "SOFT_TIMEOUT") {
+                return {
+                  type: "failed",
+                  error: error.message,
+                };
+              }
+              return {
+                type: "failed",
+                error: error instanceof Error ? error.message : "Unknown error",
+              };
+            } finally {
+              try {
+                await listener.close();
+              } catch {}
+            }
+          }
+
+          return promptManualOAuthInput(fallbackState);
+        })();
+
+        if (result.type === "failed") {
+          if (accounts.length === 0) {
+            return {
               url: "",
-              instructions: successMessage,
+              instructions: `Authentication failed: ${result.error}`,
               method: "auto",
-              callback: async (): Promise<AntigravityTokenExchangeResult> => primary,
+              callback: async () => result,
             };
           }
 
-          // TUI flow (`/connect`) does not support per-account prompts.
-          // Default to adding new accounts (non-destructive).
-          // Users can run `opencode auth logout` first if they want a fresh start.
-          return createBrowserOAuthAuthorization(client);
-        },
-      },
-      {
-        label: "Gemini API key (Antigravity SDK / Google AI)",
-        type: "api",
-        prompts: [
-          {
-            type: "text",
-            key: "key",
-            message: "Gemini API key",
-            placeholder: "GEMINI_API_KEY or Google AI API key",
-            validate: (value: string) => value.trim() ? undefined : "API key is required",
-          },
-        ],
-      },
-    ],
+          console.warn(
+            `[opencode-antigravity-auth] Skipping failed account ${accounts.length + 1}: ${result.error}`,
+          );
+          break;
+        }
+
+        accounts.push(result);
+
+        try {
+          await client.tui.showToast({
+            body: {
+              message: `Account ${accounts.length} authenticated${result.email ? ` (${result.email})` : ""}`,
+              variant: "success",
+            },
+          });
+        } catch {
+        }
+
+        try {
+          if (refreshAccountIndex !== undefined) {
+            await replaceStoredAccount(refreshAccountIndex, result);
+          } else {
+            const isFirstAccount = accounts.length === 1;
+            await persistAccountPool([result], isFirstAccount && startFresh);
+          }
+        } catch {
+        }
+
+        if (refreshAccountIndex !== undefined) {
+          break;
+        }
+
+        if (accounts.length >= MAX_OAUTH_ACCOUNTS) {
+          break;
+        }
+
+        // Get the actual deduplicated account count from storage for the prompt
+        let currentAccountCount = accounts.length;
+        try {
+          const currentStorage = await loadAccounts();
+          if (currentStorage) {
+            currentAccountCount = currentStorage.accounts.length;
+          }
+        } catch {
+          // Fall back to accounts.length if we can't read storage
+        }
+
+        const addAnother = await promptAddAnotherAccount(currentAccountCount);
+        if (!addAnother) {
+          break;
+        }
+      }
+
+      const primary = accounts[0];
+      if (!primary) {
+        return {
+          url: "",
+          instructions: "Authentication cancelled",
+          method: "auto",
+          callback: async () => ({ type: "failed", error: "Authentication cancelled" }),
+        };
+      }
+
+      let actualAccountCount = accounts.length;
+      try {
+        const finalStorage = await loadAccounts();
+        if (finalStorage) {
+          actualAccountCount = finalStorage.accounts.length;
+        }
+      } catch {
+      }
+
+      const successMessage = refreshAccountIndex !== undefined
+        ? `Token refreshed successfully.`
+        : `Multi-account setup complete (${actualAccountCount} account(s)).`;
+
+      return {
+        url: "",
+        instructions: successMessage,
+        method: "auto",
+        callback: async (): Promise<AntigravityTokenExchangeResult> => primary,
+      };
+    },
   },
   };
 };
-
-export const AntigravityCLIOAuthPlugin = createAntigravityPlugin(ANTIGRAVITY_PROVIDER_ID);
-export const GoogleOAuthPlugin = AntigravityCLIOAuthPlugin;
 
 function toUrlString(value: RequestInfo): string {
   if (typeof value === "string") {
@@ -4374,7 +4139,6 @@ function getHeaderStyleFromUrl(
 
 export const __testExports = {
   isRemovedModelId,
-  modalitiesToCapabilities,
   getHeaderStyleFromUrl,
   createSoftQuotaBlockedResponse,
   tryFetchWithAgySdkCredentials,

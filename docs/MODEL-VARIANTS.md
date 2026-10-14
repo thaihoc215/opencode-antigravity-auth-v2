@@ -52,27 +52,24 @@ The plugin accepts different variant formats depending on the model family:
 
 Gemini 3 models use string-based thinking levels. Available levels differ by model:
 
-| Level | Flash | 3.6 Flash | 3.7 Flash | 3.8 Flash | Pro | Description |
-|-------|-------|-----------|-----------|-----------|-----|-------------|
-| `minimal` | ✅ | ❌ | ❌ | ❌ | ❌ | Minimal thinking, lowest latency |
-| `low` | ✅ | ✅ | ✅ | ✅ | ✅ | Light thinking |
-| `medium` | ✅ | ✅ | ✅ | ✅ | ❌ | Balanced thinking |
-| `high` | ✅ | ✅ | ✅ | ✅ | ✅ | Maximum thinking |
+| Level | 3.8 Flash | 3.1 Pro | Description |
+|-------|-----------|---------|-------------|
+| `low` | ✅ | ✅ | Light thinking |
+| `medium` | ✅ | ❌ | Balanced thinking |
+| `high` | ✅ | ✅ | Maximum thinking |
 
-Default when no tier is requested: `low`, except **3.7 and 3.8 Flash, which default to
-`high`**. This is a deliberate deviation — Google documents `medium` as 3.7's own
-default, and every other model here defaults to `low`. An untiered 3.7 selection
-therefore costs more per request than its siblings; pick `low` or `medium`
-explicitly if that matters to you.
+Default when no tier is requested: `low`, except **3.8 Flash, which defaults to
+`high`**. This is a deliberate deviation — Google documents `medium` as the
+default. An untiered 3.8 selection therefore costs more per request than 3.1 Pro's
+`low` default; pick `low` or `medium` explicitly if that matters to you.
 
-> **Gemini 3.7 requires an Antigravity client version >= 2.5.2.** The backend
-> gates its catalog on the version in the User-Agent — a client reporting an
-> older version is simply not served the `gemini-3.7-flash-*` ids. The plugin
-> floors its reported version at the latest release, so this is handled
-> automatically; it only matters if you override the version yourself.
+> **The backend gates its model catalog on the Antigravity client version** in the
+> User-Agent: a client reporting an old version is simply not served the newer
+> Flash ids. The plugin floors its reported version at the latest release, so this
+> is handled automatically; it only matters if you override the version yourself.
 
-> **Note:** The API rejects invalid levels (e.g., `"minimal"` on Pro). Configure variants accordingly.
-> Gemini 3.6, 3.7 and 3.8 Flash serve only `low`/`medium`/`high`; a requested `minimal` is folded down to `low`.
+> **Note:** The API rejects invalid levels (e.g., `"medium"` on Pro). Configure variants accordingly.
+> Gemini 3.8 Flash serves only `low`/`medium`/`high`; a requested `minimal` is folded down to `low`.
 
 ### Output token budget
 
@@ -84,7 +81,7 @@ The plugin restores the real budget for Gemini before the request leaves:
 
 | Model line | Restored `maxOutputTokens` |
 |---|---|
-| Gemini 3 Flash (3-flash, 3.5, 3.6, 3.7, 3.8) | 65536 |
+| Gemini 3 Flash line (3.8) | 65536 |
 | Gemini 3 Pro (3.1 Pro, `gemini-pro-agent`) | 65535 |
 | Gemini 3.1 Flash Lite, Gemini 2.5 family | 65535 |
 | Image models, Claude, non-Gemini | untouched |
@@ -92,68 +89,21 @@ The plugin restores the real budget for Gemini before the request leaves:
 Only a budget equal to the cap exactly is rewritten, so setting a deliberately
 small `maxOutputTokens` still works.
 
-### Gemini 3.7 Flash: sampling parameters
+### Sampling parameters
 
-`temperature`, `topP` and `topK` are accepted and forwarded unchanged, exactly as
-for 3.6. Probed 2026-09-05 against `v1internal:generateContent`:
-`gemini-3.7-flash-high` returns 200 for a payload carrying all three.
+`temperature`, `topP` and `topK` are forwarded to the backend unchanged.
 
 Google's guidance is to leave `temperature` at its default of `1.0` for all
 Gemini 3 models — lower values "may lead to unexpected behavior, such as looping
 or degraded performance" — but that is advice, not a rejected field. Prefer
-`thinkingLevel` for controlling 3.7's behaviour.
-
-### Gemini 3.6 Flash Example
-
-Gemini 3.6 Flash carries the effort level in the Antigravity backend id itself
-(`gemini-3.6-flash-low` / `-medium` / `-high`), unlike 3.5 Flash where `low` and
-`medium` share one backend id and `high` maps to `gemini-3-flash-agent`. The
-resolver handles that translation — configure it with plain variants:
-
-```json
-{
-  "antigravity-gemini-3.6-flash": {
-    "name": "Gemini 3.6 Flash (Antigravity)",
-    "limit": { "context": 1048576, "output": 65536 },
-    "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
-    "variants": {
-      "low": { "thinkingLevel": "low" },
-      "medium": { "thinkingLevel": "medium" },
-      "high": { "thinkingLevel": "high" }
-    }
-  }
-}
-```
-
-### Gemini 3.7 Flash Example
-
-3.7 Flash follows the same effort-in-the-id scheme as 3.6
-(`gemini-3.7-flash-low` / `-medium` / `-high`), and additionally accepts video and
-audio input:
-
-```json
-{
-  "antigravity-gemini-3.7-flash": {
-    "name": "Gemini 3.7 Flash (Antigravity)",
-    "limit": { "context": 1048576, "output": 65536 },
-    "modalities": {
-      "input": ["text", "image", "pdf", "video", "audio"],
-      "output": ["text"]
-    },
-    "variants": {
-      "low": { "thinkingLevel": "low" },
-      "medium": { "thinkingLevel": "medium" },
-      "high": { "thinkingLevel": "high" }
-    }
-  }
-}
-```
+`thinkingLevel` for controlling the model's behaviour.
 
 ### Gemini 3.8 Flash Example
 
-3.8 Flash matches 3.7: backend ids `gemini-3.8-flash-low` / `-medium` / `-high`,
-default `high`, context 1048576, output 65536, and video/audio input (Antigravity
-catalog, 2026-10-14). The catalog also lists `gemini-3.8-flash-tiered`, which the
+3.8 Flash carries the effort level in the Antigravity backend id itself
+(`gemini-3.8-flash-low` / `-medium` / `-high`); the resolver picks the id from the
+variant. Default `high`, context 1048576, output 65536, and video/audio input
+(Antigravity catalog, 2026-10-14). The catalog also lists `gemini-3.8-flash-tiered`, which the
 plugin does not expose. There is no 3.8 Flash Lite in the catalog.
 
 ```json

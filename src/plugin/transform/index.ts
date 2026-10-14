@@ -23,8 +23,6 @@ export {
   resolveModelWithTier,
   resolveModelWithVariant,
   resolveModelForHeaderStyle,
-  resolveAntigravityGemini35FlashBackendModel,
-  resolveAntigravityEffortInIdFlashBackendModel,
   geminiMaxOutputTokens,
   restoreGeminiMaxOutputTokens,
   OPENCODE_OUTPUT_TOKEN_CAP,

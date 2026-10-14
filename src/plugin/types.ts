@@ -26,22 +26,6 @@ export interface ProviderModel {
   [key: string]: unknown;
 }
 
-export interface Provider {
-  id?: string;
-  api?: string;
-  npm?: string;
-  models?: Record<string, ProviderModel>;
-}
-
-export interface ProviderModelsContext {
-  auth?: AuthDetails;
-}
-
-export interface ProviderHook {
-  id: string;
-  models?: (provider: Provider, context: ProviderModelsContext) => Promise<Record<string, ProviderModel>>;
-}
-
 export interface LoaderResult {
   apiKey: string;
   fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
@@ -50,17 +34,12 @@ export interface LoaderResult {
 export type ToastVariant = "info" | "warning" | "success" | "error";
 
 /**
- * The host operations the plugin core calls. The core was written against the
- * OpenCode V1 SDK client; this interface keeps those call shapes so the core is
- * host-agnostic. The V2 entrypoint (src/v2/host.ts) implements it on top of the
- * V2 plugin context, and the account CLI implements it for a plain terminal.
+ * The host operations the plugin core calls, in the call shapes of the
+ * OpenCode V1 SDK client the core was written against. The V2 entrypoint
+ * (src/v2/host.ts) implements it on top of the V2 plugin context, and the
+ * account CLI implements it for a plain terminal.
  */
 export interface PluginClient {
-  app?: {
-    log(options: {
-      body: { service: string; level: string; message: string; extra?: Record<string, unknown> };
-    }): Promise<unknown>;
-  };
   tui: {
     showToast(options: {
       body: { title?: string; message: string; variant: ToastVariant; duration?: number };
@@ -72,19 +51,6 @@ export interface PluginClient {
       body: { type: "oauth"; refresh: string; access: string; expires: number };
     }): Promise<unknown>;
   };
-  session: {
-    prompt(options: {
-      path: { id: string };
-      body: {
-        parts: Array<{ type: "text"; text: string }>;
-        agent?: string;
-        model?: { providerID: string; modelID: string };
-      };
-      query?: { directory?: string };
-    }): Promise<unknown>;
-    abort(options: { path: { id: string } }): Promise<unknown>;
-    messages(options: { path: { id: string }; query?: { directory?: string } }): Promise<unknown>;
-  };
 }
 
 export interface PluginContext {
@@ -93,23 +59,6 @@ export interface PluginContext {
   /** Plugin options from opencode.json; override antigravity.json settings. */
   options?: Record<string, unknown>;
 }
-
-export type AuthPrompt =
-  | {
-      type: "text";
-      key: string;
-      message: string;
-      placeholder?: string;
-      validate?: (value: string) => string | undefined;
-      condition?: (inputs: Record<string, string>) => boolean;
-    }
-  | {
-      type: "select";
-      key: string;
-      message: string;
-      options: Array<{ label: string; value: string; hint?: string }>;
-      condition?: (inputs: Record<string, string>) => boolean;
-    };
 
 export type OAuthAuthorizationResult = { url: string; instructions: string } & (
   | {
@@ -121,14 +70,6 @@ export type OAuthAuthorizationResult = { url: string; instructions: string } & (
       callback: (code: string) => Promise<AntigravityTokenExchangeResult>;
     }
 );
-
-export interface AuthMethod {
-  provider?: string;
-  label: string;
-  type: "oauth" | "api";
-  prompts?: AuthPrompt[];
-  authorize?: (inputs?: Record<string, string>) => Promise<OAuthAuthorizationResult>;
-}
 
 /**
  * A host-agnostic tool definition: JSON Schema input plus an executor that
@@ -143,7 +84,6 @@ export interface CoreTool<Args> {
 export interface GoogleSearchArgs {
   query: string;
   urls?: string[];
-  thinking?: boolean;
 }
 
 export const GOOGLE_SEARCH_INPUT_SCHEMA = {
@@ -159,32 +99,21 @@ export const GOOGLE_SEARCH_INPUT_SCHEMA = {
       description:
         "List of specific URLs to fetch and analyze. IMPORTANT: Always extract and include any URLs mentioned by the user in their query here.",
     },
-    thinking: {
-      type: "boolean",
-      default: true,
-      description: "Enable deep thinking for more thorough analysis (default: true)",
-    },
   },
   required: ["query"],
   additionalProperties: false,
 } as const satisfies Record<string, unknown>;
 
-export interface PluginEventPayload {
-  event: {
-    type: string;
-    properties?: unknown;
-  };
-}
-
 export interface PluginResult {
   auth: {
-    provider: string;
-    loader: (getAuth: GetAuth, provider: Provider) => Promise<LoaderResult | Record<string, unknown>>;
-    methods: AuthMethod[];
+    /** Builds the account pool and the Antigravity fetch from the host's credential. */
+    loader: (getAuth: GetAuth) => Promise<LoaderResult | Record<string, unknown>>;
+    /** Interactive terminal login (account manager CLI). */
+    login: (inputs?: Record<string, string>) => Promise<OAuthAuthorizationResult>;
   };
-  event?: (payload: PluginEventPayload) => void;
-  tool?: { google_search: CoreTool<GoogleSearchArgs> };
-  provider?: ProviderHook;
+  tool: { google_search: CoreTool<GoogleSearchArgs> };
+  /** Static model definitions merged with the models discovered for `auth`. */
+  models: (auth: AuthDetails | undefined) => Promise<Record<string, ProviderModel>>;
 }
 
 export interface RefreshParts {

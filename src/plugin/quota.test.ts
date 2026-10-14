@@ -5,15 +5,15 @@ import { __testExports } from "./quota.ts";
 describe("Antigravity quota aggregation", () => {
   it("uses the best available Gemini variant instead of the most exhausted rollout variant", () => {
     const summary = __testExports.aggregateQuota({
-      "gemini-3.5-flash-low": {
-        displayName: "Gemini 3.5 Flash Low",
+      "gemini-3.8-flash-low": {
+        displayName: "Gemini 3.8 Flash Low",
         quotaInfo: {
           remainingFraction: 1,
           resetTime: "2026-05-26T18:00:00Z",
         },
       },
-      "gemini-3-flash-agent": {
-        displayName: "Gemini 3 Flash Agent",
+      "gemini-3.8-flash-high": {
+        displayName: "Gemini 3.8 Flash High",
         quotaInfo: {
           remainingFraction: 0,
           resetTime: "2026-05-27T18:00:00Z",
@@ -28,15 +28,15 @@ describe("Antigravity quota aggregation", () => {
 
   it("keeps resetTime coupled to the model whose remainingFraction is displayed", () => {
     const summary = __testExports.aggregateQuota({
-      "gemini-3.5-flash-low": {
-        displayName: "Gemini 3.5 Flash Low",
+      "gemini-3.8-flash-low": {
+        displayName: "Gemini 3.8 Flash Low",
         quotaInfo: {
           remainingFraction: 1,
           resetTime: "2026-05-27T18:00:00Z",
         },
       },
-      "gemini-3-flash-agent": {
-        displayName: "Gemini 3 Flash Agent",
+      "gemini-3.8-flash-high": {
+        displayName: "Gemini 3.8 Flash High",
         quotaInfo: {
           remainingFraction: 0,
           resetTime: "2026-05-26T18:00:00Z",
@@ -44,7 +44,7 @@ describe("Antigravity quota aggregation", () => {
       },
     });
 
-    // The displayed remainingFraction (1) belongs to gemini-3.5-flash-low, so the
+    // The displayed remainingFraction (1) belongs to gemini-3.8-flash-low, so the
     // reset time must be that same model's reset time, not the earliest across models.
     expect(summary.groups["gemini-flash"]?.remainingFraction).toBe(1);
     expect(summary.groups["gemini-flash"]?.resetTime).toBe("2026-05-27T18:00:00Z");
@@ -52,15 +52,15 @@ describe("Antigravity quota aggregation", () => {
 
   it("takes the resetTime of the winning model regardless of iteration order", () => {
     const summary = __testExports.aggregateQuota({
-      "gemini-3-flash-agent": {
-        displayName: "Gemini 3 Flash Agent",
+      "gemini-3.8-flash-high": {
+        displayName: "Gemini 3.8 Flash High",
         quotaInfo: {
           remainingFraction: 0.2,
           resetTime: "2026-05-26T18:00:00Z",
         },
       },
-      "gemini-3.5-flash-low": {
-        displayName: "Gemini 3.5 Flash Low",
+      "gemini-3.8-flash-low": {
+        displayName: "Gemini 3.8 Flash Low",
         quotaInfo: {
           remainingFraction: 0.9,
           resetTime: "2026-05-28T18:00:00Z",
@@ -76,15 +76,15 @@ describe("Antigravity quota aggregation", () => {
     // Both models are equally drained; the representative reset time must be the
     // earliest, regardless of iteration order (the later-reset model is first).
     const summary = __testExports.aggregateQuota({
-      "gemini-3.5-flash-low": {
-        displayName: "Gemini 3.5 Flash Low",
+      "gemini-3.8-flash-low": {
+        displayName: "Gemini 3.8 Flash Low",
         quotaInfo: {
           remainingFraction: 0.5,
           resetTime: "2026-05-28T18:00:00Z",
         },
       },
-      "gemini-3-flash-agent": {
-        displayName: "Gemini 3 Flash Agent",
+      "gemini-3.8-flash-high": {
+        displayName: "Gemini 3.8 Flash High",
         quotaInfo: {
           remainingFraction: 0.5,
           resetTime: "2026-05-26T18:00:00Z",
@@ -115,7 +115,7 @@ describe("Antigravity quota aggregation", () => {
       "gemini-3.1-flash-lite": {
         quotaInfo: { resetTime: "2026-05-28T18:00:00Z" },
       },
-      "gemini-3.5-flash-low": {
+      "gemini-3.8-flash-low": {
         quotaInfo: { resetTime: "2026-05-28T18:00:00Z" },
       },
     });
@@ -129,7 +129,7 @@ describe("Antigravity quota aggregation", () => {
       "gemini-3.1-flash-lite": {
         quotaInfo: { resetTime: "2026-05-28T18:00:00Z" },
       },
-      "gemini-3.5-flash-low": {
+      "gemini-3.8-flash-low": {
         quotaInfo: { remainingFraction: 0.38, resetTime: "2026-05-28T18:00:00Z" },
       },
     });
@@ -140,8 +140,8 @@ describe("Antigravity quota aggregation", () => {
 
   it("ignores unparseable reset times", () => {
     const summary = __testExports.aggregateQuota({
-      "gemini-3-flash-agent": {
-        displayName: "Gemini 3 Flash Agent",
+      "gemini-3.8-flash-high": {
+        displayName: "Gemini 3.8 Flash High",
         quotaInfo: {
           remainingFraction: 0.5,
           resetTime: "not-a-date",
@@ -195,13 +195,10 @@ describe("Gemini CLI quota bucket filtering", () => {
     { modelId: "gemini-2.0-flash", remainingFraction: 1, resetTime: "2026-08-17T00:00:00Z" },
   ];
 
-  it("surfaces Gemini 3.6 Flash alongside the other kept models", () => {
+  it("surfaces only the kept models, dropping the removed Flash generations", () => {
     const summary = __testExports.aggregateGeminiCliQuota({ buckets });
     expect(summary.models.map((model) => model.modelId)).toEqual([
       "gemini-3.1-pro",
-      "gemini-3.5-flash",
-      "gemini-3.6-flash",
-      "gemini-3.7-flash",
       "gemini-3.8-flash",
     ]);
   });
@@ -210,17 +207,5 @@ describe("Gemini CLI quota bucket filtering", () => {
     const summary = __testExports.aggregateGeminiCliQuota({ buckets });
     const flash38 = summary.models.find((model) => model.modelId === "gemini-3.8-flash");
     expect(flash38?.remainingFraction).toBe(0.7);
-  });
-
-  it("keeps the remaining fraction attached to the 3.7 Flash bucket", () => {
-    const summary = __testExports.aggregateGeminiCliQuota({ buckets });
-    const flash37 = summary.models.find((model) => model.modelId === "gemini-3.7-flash");
-    expect(flash37?.remainingFraction).toBe(0.8);
-  });
-
-  it("keeps the remaining fraction attached to the 3.6 Flash bucket", () => {
-    const summary = __testExports.aggregateGeminiCliQuota({ buckets });
-    const flash36 = summary.models.find((model) => model.modelId === "gemini-3.6-flash");
-    expect(flash36?.remainingFraction).toBe(0.9);
   });
 });

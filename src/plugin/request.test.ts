@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import {
   prepareAntigravityRequest,
   transformAntigravityResponse,
-  getPluginSessionId,
   isGenerativeLanguageRequest,
   __testExports,
 } from "./request";
@@ -71,15 +70,6 @@ function withKeepThinking<T>(enabled: boolean, fn: () => T): T {
 }
 
 describe("request.ts", () => {
-  describe("getPluginSessionId", () => {
-    it("returns consistent session ID across calls", () => {
-      const id1 = getPluginSessionId();
-      const id2 = getPluginSessionId();
-      expect(id1).toBe(id2);
-      expect(id1).toBeTruthy();
-    });
-  });
-
   describe("isGenerativeLanguageRequest", () => {
     it("returns true for generativelanguage.googleapis.com URLs", () => {
       expect(isGenerativeLanguageRequest("https://generativelanguage.googleapis.com/v1/models")).toBe(true);
@@ -1202,38 +1192,27 @@ it("removes API key headers", () => {
         expect(result.effectiveModel).toBe("gemini-3.1-pro-low");
       });
 
-      it("transforms gemini-3.5-flash to the Antigravity low backend id for antigravity headerStyle", () => {
+      it("transforms gemini-3.8-flash to its default high backend id for antigravity headerStyle", () => {
         const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
           { method: "POST", body: JSON.stringify({ contents: [] }) },
           mockAccessToken,
           mockProjectId,
           undefined,
           "antigravity"
         );
-        expect(result.effectiveModel).toBe("gemini-3.5-flash-low");
-      });
-
-      it("injects default thinkingLevel for bare gemini-3.5-flash on antigravity", () => {
-        const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
-          { method: "POST", body: JSON.stringify({ contents: [] }) },
-          mockAccessToken,
-          mockProjectId,
-          undefined,
-          "antigravity"
-        );
-        expect(result.effectiveModel).toBe("gemini-3.5-flash-low");
+        expect(result.effectiveModel).toBe("gemini-3.8-flash-high");
         const wrapped = JSON.parse(result.init.body as string);
+        expect(wrapped.model).toBe("gemini-3.8-flash-high");
         expect(wrapped.request.generationConfig.thinkingConfig).toMatchObject({
-          thinkingLevel: "low",
+          thinkingLevel: "high",
           includeThoughts: true,
         });
       });
 
-      it("injects default thinkingLevel for wrapped gemini-3.5-flash requests", () => {
+      it("maps the default backend id for wrapped gemini-3.8-flash requests", () => {
         const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
           {
             method: "POST",
             body: JSON.stringify({
@@ -1246,17 +1225,17 @@ it("removes API key headers", () => {
           undefined,
           "antigravity"
         );
-        expect(result.effectiveModel).toBe("gemini-3.5-flash-low");
+        expect(result.effectiveModel).toBe("gemini-3.8-flash-high");
         const wrapped = JSON.parse(result.init.body as string);
         expect(wrapped.request.generationConfig.thinkingConfig).toMatchObject({
-          thinkingLevel: "low",
+          thinkingLevel: "high",
           includeThoughts: true,
         });
       });
 
-      it("preserves explicit thinkingLevel for gemini-3.5-flash", () => {
+      it("moves the gemini-3.8-flash backend id with an explicit thinkingLevel", () => {
         const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
           {
             method: "POST",
             body: JSON.stringify({
@@ -1274,53 +1253,25 @@ it("removes API key headers", () => {
           undefined,
           "antigravity"
         );
-        expect(result.effectiveModel).toBe("gemini-3.5-flash-low");
+        expect(result.effectiveModel).toBe("gemini-3.8-flash-medium");
         const wrapped = JSON.parse(result.init.body as string);
+        expect(wrapped.model).toBe("gemini-3.8-flash-medium");
         expect(wrapped.request.generationConfig.thinkingConfig).toMatchObject({
           thinkingLevel: "medium",
           includeThoughts: false,
         });
       });
 
-      it("maps explicit high thinkingLevel for gemini-3.5-flash to the Antigravity high backend id", () => {
+      it("maps a providerOptions low variant for gemini-3.8-flash to the low backend id", () => {
         const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
-          {
-            method: "POST",
-            body: JSON.stringify({
-              contents: [],
-              generationConfig: {
-                thinkingConfig: {
-                  thinkingLevel: "high",
-                  includeThoughts: true,
-                },
-              },
-            }),
-          },
-          mockAccessToken,
-          mockProjectId,
-          undefined,
-          "antigravity"
-        );
-        expect(result.effectiveModel).toBe("gemini-3-flash-agent");
-        const wrapped = JSON.parse(result.init.body as string);
-        expect(wrapped.model).toBe("gemini-3-flash-agent");
-        expect(wrapped.request.generationConfig.thinkingConfig).toMatchObject({
-          thinkingLevel: "high",
-          includeThoughts: true,
-        });
-      });
-
-      it("maps providerOptions high variant for gemini-3.5-flash to the Antigravity high backend id", () => {
-        const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
           {
             method: "POST",
             body: JSON.stringify({
               contents: [],
               providerOptions: {
                 google: {
-                  thinkingLevel: "high",
+                  thinkingLevel: "low",
                 },
               },
             }),
@@ -1330,11 +1281,11 @@ it("removes API key headers", () => {
           undefined,
           "antigravity"
         );
-        expect(result.effectiveModel).toBe("gemini-3-flash-agent");
+        expect(result.effectiveModel).toBe("gemini-3.8-flash-low");
         const wrapped = JSON.parse(result.init.body as string);
-        expect(wrapped.model).toBe("gemini-3-flash-agent");
+        expect(wrapped.model).toBe("gemini-3.8-flash-low");
         expect(wrapped.request.generationConfig.thinkingConfig).toMatchObject({
-          thinkingLevel: "high",
+          thinkingLevel: "low",
           includeThoughts: true,
         });
       });
@@ -1387,30 +1338,19 @@ it("removes API key headers", () => {
         expect(result.effectiveModel).toBe("gemini-3.1-pro");
       });
 
-      it("keeps gemini-3.5-flash as gemini-3.5-flash (bare) for gemini-cli headerStyle", () => {
+      it("keeps gemini-3.8-flash bare for gemini-cli headerStyle", () => {
         const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
           { method: "POST", body: JSON.stringify({ contents: [] }) },
           mockAccessToken,
           mockProjectId,
           undefined,
           "gemini-cli"
         );
-        expect(result.effectiveModel).toBe("gemini-3.5-flash");
-      });
-
-      it("injects default thinkingLevel for bare gemini-3.5-flash on gemini-cli", () => {
-        const result = prepareAntigravityRequest(
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
-          { method: "POST", body: JSON.stringify({ contents: [] }) },
-          mockAccessToken,
-          mockProjectId,
-          undefined,
-          "gemini-cli"
-        );
+        expect(result.effectiveModel).toBe("gemini-3.8-flash");
         const wrapped = JSON.parse(result.init.body as string);
         expect(wrapped.request.generationConfig.thinkingConfig).toMatchObject({
-          thinkingLevel: "low",
+          thinkingLevel: "high",
           includeThoughts: true,
         });
       });
@@ -1697,7 +1637,7 @@ describe("getDisplayedThinkingHashes (per-session dedup scoping)", () => {
   });
 });
 
-describe("Gemini 3.7 Flash request pipeline", () => {
+describe("Effort-in-id Flash request pipeline", () => {
   const mockAccessToken = "test-token";
   const mockProjectId = "test-project";
 
@@ -1721,12 +1661,10 @@ describe("Gemini 3.7 Flash request pipeline", () => {
     return JSON.parse(String(result.init.body));
   };
 
-  // Probed 2026-09-05 against v1internal:generateContent: gemini-3.7-flash-high
-  // returns 200 for a payload carrying temperature/topP/topK, with a normal
-  // candidate and modelVersion "gemini-3.7-flash". Google's docs say only to
-  // keep temperature at its 1.0 default, never that the fields were removed —
-  // so the pipeline must forward them untouched, exactly like 3.6.
-  it.each(["antigravity-gemini-3.7-flash-high", "antigravity-gemini-3.6-flash-high"])(
+  // The backend accepts temperature/topP/topK on the effort-in-id Flash ids, and
+  // Google's docs only advise keeping temperature at its 1.0 default — so the
+  // pipeline must forward them untouched.
+  it.each(["antigravity-gemini-3.8-flash-high", "antigravity-gemini-3.8-flash-low"])(
     "forwards temperature/topP/topK unchanged for %s",
     async (model) => {
       const body = await bodyFor(model, {
@@ -1755,9 +1693,9 @@ describe("restoreGeminiMaxOutputTokens", () => {
 
   it("restores the model's real limit when OpenCode's global cap is present", () => {
     // OpenCode computes maxOutputTokens as Math.min(limit.output, 32000), so a
-    // 3.7 Flash request arrives capped at 32000 despite a 65536 limit.
+    // 3.8 Flash request arrives capped at 32000 despite a 65536 limit.
     const payload = { generationConfig: { maxOutputTokens: 32000, temperature: 0.5 } };
-    restoreGeminiMaxOutputTokens(payload, "gemini-3.7-flash-high");
+    restoreGeminiMaxOutputTokens(payload, "gemini-3.8-flash-high");
     expect(payload.generationConfig).toEqual({
       maxOutputTokens: 65536,
       temperature: 0.5,
@@ -1774,13 +1712,13 @@ describe("restoreGeminiMaxOutputTokens", () => {
     // Only the exact cap is treated as OpenCode's doing; a caller asking for a
     // short response must keep it.
     const payload = { generationConfig: { maxOutputTokens: 512 } };
-    restoreGeminiMaxOutputTokens(payload, "gemini-3.7-flash-high");
+    restoreGeminiMaxOutputTokens(payload, "gemini-3.8-flash-high");
     expect(payload.generationConfig).toEqual({ maxOutputTokens: 512 });
   });
 
   it("leaves a value at or above the limit alone", () => {
     const payload = { generationConfig: { maxOutputTokens: 65536 } };
-    restoreGeminiMaxOutputTokens(payload, "gemini-3.7-flash-high");
+    restoreGeminiMaxOutputTokens(payload, "gemini-3.8-flash-high");
     expect(payload.generationConfig).toEqual({ maxOutputTokens: 65536 });
   });
 
@@ -1798,7 +1736,7 @@ describe("restoreGeminiMaxOutputTokens", () => {
 
   it("does nothing when there is no generationConfig", () => {
     const payload: Record<string, unknown> = { contents: [] };
-    expect(() => restoreGeminiMaxOutputTokens(payload, "gemini-3.7-flash-high")).not.toThrow();
+    expect(() => restoreGeminiMaxOutputTokens(payload, "gemini-3.8-flash-high")).not.toThrow();
     expect(payload).toEqual({ contents: [] });
   });
 });
@@ -1820,15 +1758,8 @@ describe("Gemini output budget in the request pipeline", () => {
     return parsed.request?.generationConfig ?? parsed.generationConfig ?? {};
   };
 
-  it("sends 65536 for 3.7 Flash instead of OpenCode's 32000 cap", async () => {
-    const sent = await bodyFor("antigravity-gemini-3.7-flash-high", {
-      maxOutputTokens: 32000,
-    });
-    expect(sent.maxOutputTokens).toBe(65536);
-  });
-
-  it("lifts the cap for 3.6 Flash too", async () => {
-    const sent = await bodyFor("antigravity-gemini-3.6-flash-high", {
+  it("sends 65536 for 3.8 Flash instead of OpenCode's 32000 cap", async () => {
+    const sent = await bodyFor("antigravity-gemini-3.8-flash-high", {
       maxOutputTokens: 32000,
     });
     expect(sent.maxOutputTokens).toBe(65536);

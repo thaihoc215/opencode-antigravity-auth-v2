@@ -90,19 +90,19 @@ Add this to your `google` provider config:
 ```
 
 ### Session errors
-Type `continue` to trigger auto-recovery, or use `/undo` to roll back.
+Retry the request, or use `/undo` to roll back.
 
-### Configuration Key Typo
+### Configuration Key
 
-The correct key is `plugin` (singular):
+This is an OpenCode V2 plugin. List it under `plugins` (plural), as an object:
 
 ```json
 {
-  "plugin": ["opencode-antigravity-auth@latest"]
+  "plugins": [{ "package": "opencode-antigravity-auth@latest" }]
 }
 ```
 
-**Not** `"plugins"` (will cause "Unrecognized key" error).
+The 1.x `"plugin": ["..."]` key does not load this version.
 
 ### "Invalid SemVer: beta"
 
@@ -185,7 +185,7 @@ Invalid JSON payload received. Unknown name "parameters" at 'request.tools[0]'
 **Solutions:**
 1. **Update to latest beta:**
    ```json
-   { "plugin": ["opencode-antigravity-auth@beta"] }
+   { "plugins": [{ "package": "opencode-antigravity-auth@beta" }] }
    ```
 
 2. **Disable MCP servers** one-by-one to find the problematic one
@@ -275,7 +275,7 @@ If you only have one account, you'll likely have a better experience using [Anti
 If adding new accounts:
 1. Delete accounts file: `rm ~/.config/opencode/antigravity-accounts.json`
 2. Re-authenticate: `opencode auth login`
-3. Update to latest beta: `"plugin": ["opencode-antigravity-auth@beta"]`
+3. Update to latest beta: `"plugins": [{ "package": "opencode-antigravity-auth@beta" }]`
 4. Consider "warming up" the account in Antigravity IDE first
 
 </details>
@@ -379,7 +379,7 @@ ssh -L 51121:localhost:51121 user@remote
 ## Migrating Accounts Between Machines
 
 When copying `antigravity-accounts.json` to a new machine:
-1. Ensure the plugin is installed: `"plugin": ["opencode-antigravity-auth@beta"]`
+1. Ensure the plugin is installed: `"plugins": [{ "package": "opencode-antigravity-auth@beta" }]`
 2. Copy `~/.config/opencode/antigravity-accounts.json`
 3. If you get "API key missing" error, the refresh token may be invalid — re-authenticate
 
@@ -389,16 +389,7 @@ When copying `antigravity-accounts.json` to a new machine:
 
 ### @tarquinen/opencode-dcp
 
-DCP creates synthetic assistant messages that lack thinking blocks. **List this plugin BEFORE DCP:**
-
-```json
-{
-  "plugin": [
-    "opencode-antigravity-auth@latest",
-    "@tarquinen/opencode-dcp@latest"
-  ]
-}
-```
+DCP creates synthetic assistant messages that lack thinking blocks. On OpenCode 1.x the fix was to list this plugin before DCP in `"plugin"`. This version is a V2 plugin listed under `"plugins"`; the ordering with DCP has not been verified on V2.
 
 ### oh-my-opencode
 

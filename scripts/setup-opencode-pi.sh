@@ -28,28 +28,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
     cat <<EOF > "$CONFIG_FILE"
 {
   "\$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-antigravity-auth@latest"],
-  "provider": {
-    "google": {
-      "models": {
-        "antigravity-gemini-3-pro": {
-          "name": "Gemini 3 Pro (Antigravity)",
-          "limit": { "context": 1048576, "output": 65535 },
-          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
-          "variants": {
-            "low": { "thinkingLevel": "low" },
-            "high": { "thinkingLevel": "high" }
-          }
-        }
-      }
-    }
-  }
+  "plugins": [{ "package": "opencode-antigravity-auth@latest" }]
 }
 EOF
     echo "Configuration created at $CONFIG_FILE"
 else
     echo -e "${YELLOW}[2/3] opencode.json already exists. Skipping overwrite.${NC}"
-    echo "Make sure 'opencode-antigravity-auth@latest' is in your 'plugin' list."
+    echo "Make sure { \"package\": \"opencode-antigravity-auth@latest\" } is in your 'plugins' list."
 fi
 
 # 3. Auth Instructions

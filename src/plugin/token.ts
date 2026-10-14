@@ -1,6 +1,5 @@
 import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET } from "../constants";
 import { formatRefreshParts, parseRefreshParts, calculateTokenExpiry } from "./auth";
-import { clearCachedAuth, storeCachedAuth } from "./cache";
 import { createLogger } from "./logger";
 import { invalidateProjectContextCache } from "./project";
 import type { OAuthAuthDetails, PluginClient, RefreshParts } from "./types";
@@ -124,7 +123,6 @@ export async function refreshAccessToken(
       if (code === "invalid_grant") {
         log.warn("Google revoked the stored refresh token - reauthentication required");
         invalidateProjectContextCache(auth.refresh);
-        clearCachedAuth(auth.refresh);
       }
 
       throw new AntigravityTokenRefreshError({
@@ -155,7 +153,6 @@ export async function refreshAccessToken(
       refresh: formatRefreshParts(refreshedParts),
     };
 
-    storeCachedAuth(updatedAuth);
     invalidateProjectContextCache(auth.refresh);
 
     return updatedAuth;

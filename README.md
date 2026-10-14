@@ -174,13 +174,8 @@ If OpenCode still behaves like an older build, see [Behavior doesn't match the v
 
 | Model | Variants | Notes |
 |-------|----------|-------|
-| `antigravity-gemini-3-pro` | low, high | Gemini 3 Pro with thinking |
 | `antigravity-gemini-3.1-pro` | low, high | Gemini 3.1 Pro with thinking (rollout-dependent) |
-| `antigravity-gemini-3-flash` | minimal, low, medium, high | Gemini 3 Flash with thinking |
-| `antigravity-gemini-3.5-flash` | minimal, low, medium, high | Gemini 3.5 Flash with thinking (rollout-dependent) |
-| `antigravity-gemini-3.6-flash` | low, medium, high | Gemini 3.6 Flash with thinking (no `minimal` tier) |
-| `antigravity-gemini-3.7-flash` | low, medium, high | Gemini 3.7 Flash — defaults to `high` (not `low` like its siblings); needs client version >= 2.5.2 |
-| `antigravity-gemini-3.8-flash` | low, medium, high | Gemini 3.8 Flash — defaults to `high`, like 3.7; video/audio input |
+| `antigravity-gemini-3.8-flash` | low, medium, high | Gemini 3.8 Flash — defaults to `high` (not `low` like Pro); video/audio input |
 | `antigravity-claude-sonnet-4-6` | — | Claude Sonnet 4.6 |
 | `antigravity-claude-opus-4-6-thinking` | low, max | Claude Opus 4.6 with extended thinking |
 
@@ -192,14 +187,7 @@ The official Antigravity SDK uses `GEMINI_API_KEY` for local Gemini access. This
 
 | Model | Notes |
 |-------|-------|
-| `gemini-2.5-flash` | Gemini 2.5 Flash |
-| `gemini-2.5-pro` | Gemini 2.5 Pro |
-| `gemini-3-flash-preview` | Gemini 3 Flash (preview) |
-| `gemini-3.5-flash` | Gemini 3.5 Flash (rollout-dependent) |
-| `gemini-3.6-flash` | Gemini 3.6 Flash (variants: low, medium, high) |
-| `gemini-3.7-flash` | Gemini 3.7 Flash (variants: low, medium, high; defaults to high) |
 | `gemini-3.8-flash` | Gemini 3.8 Flash (variants: low, medium, high; defaults to high) |
-| `gemini-3-pro-preview` | Gemini 3 Pro (preview) |
 | `gemini-3.1-pro` | Gemini 3.1 Pro |
 | `gemini-3.1-pro-preview-customtools` | Gemini 3.1 Pro Preview Custom Tools |
 
@@ -421,12 +409,11 @@ This usually means an MCP tool name starts with a number (for example, a 1mcp ke
 
 ### Session Recovery
 
-> The automatic session-recovery hook (and its toasts) is not available on OpenCode V2: it read OpenCode 1.x on-disk session storage. Request-level thinking recovery still works.
+> The automatic session-recovery hook was removed in 2.0: it read OpenCode 1.x on-disk session storage, which V2 does not use. Request-level thinking recovery still works.
 
 If you encounter errors during a session:
-1. Type `continue` to trigger the recovery mechanism
+1. Retry the operation
 2. If blocked, use `/undo` to revert to pre-error state
-3. Retry the operation
 
 ---
 
@@ -609,7 +596,6 @@ Most users don't need to configure anything — defaults work well.
 | Option | Default | What it does |
 |--------|---------|--------------
 | `keep_thinking` | `false` | Preserve Claude's thinking across turns. **Warning:** enabling may degrade model stability. |
-| `session_recovery` | `true` | Auto-recover from tool errors |
 | `cli_first` | `false` | Route Gemini models to the legacy Gemini CLI path first (Claude and image models stay on Antigravity). |
 | `agy_sdk.enabled` | `true` | Enables the Antigravity SDK / Gemini API key route for Gemini requests. |
 | `agy_sdk.prefer_for_gemini` | `false` | When API keys are configured, use the Gemini API route before OAuth-backed Antigravity for Gemini models. |
@@ -683,8 +669,7 @@ Control how the plugin handles rate limits:
 |--------|---------|--------------|
 | `quiet_mode` | `false` | Hide toast notifications |
 | `debug` | `false` | Enable debug file logging (`~/.config/opencode/antigravity-logs/`) |
-| `debug_tui` | `false` | Show debug logs in the TUI log panel (independent from `debug`) |
-| `auto_update` | `true` | Auto-update plugin |
+| `debug_tui` | `false` | Add the request's debug lines to the model's thinking output and error messages (independent from `debug`) |
 
 For all options, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
@@ -693,7 +678,7 @@ For all options, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 OPENCODE_CONFIG_DIR=/path/to/config opencode  # Custom config directory
 OPENCODE_ANTIGRAVITY_DEBUG=1 opencode         # Enable debug file logging
 OPENCODE_ANTIGRAVITY_DEBUG=2 opencode         # Verbose debug file logging
-OPENCODE_ANTIGRAVITY_DEBUG_TUI=1 opencode     # Enable TUI log panel debug output
+OPENCODE_ANTIGRAVITY_DEBUG_TUI=1 opencode     # Add debug lines to thinking output
 ```
 
 ---

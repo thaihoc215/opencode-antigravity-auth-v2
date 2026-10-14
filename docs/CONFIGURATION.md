@@ -35,9 +35,6 @@ Settings that affect how the model thinks and responds.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `keep_thinking` | `false` | Preserve Claude's thinking blocks across turns. **Warning:** enabling may degrade model stability. |
-| `session_recovery` | `true` | Auto-recover from tool_result_missing errors |
-| `auto_resume` | `false` | Auto-send resume prompt after recovery |
-| `resume_text` | `"continue"` | Text to send when auto-resuming |
 
 > **Note:** The `web_search` config options are deprecated. Google Search is now implemented as a dedicated `google_search` tool that the model can call explicitly.
 
@@ -62,7 +59,6 @@ Settings for managing multiple Google accounts.
 | `account_selection_strategy` | `"hybrid"` | How to select accounts |
 | `switch_on_first_rate_limit` | `true` | Switch account immediately on first 429 |
 | `pid_offset_enabled` | `false` | Distribute sessions across accounts (for parallel agents) |
-| `quota_fallback` | `false` | Deprecated (ignored). Kept for backward compatibility; Gemini fallback is automatic |
 
 ### Strategy Guide
 
@@ -89,10 +85,10 @@ Settings that control plugin behavior.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `quiet_mode` | `false` | Hide toast notifications (except recovery) |
+| `quiet_mode` | `false` | Hide toast notifications |
 | `debug` | `false` | Enable debug logging |
 | `log_dir` | OS default | Custom directory for debug logs |
-| `auto_update` | `true` | Enable automatic plugin updates |
+| `debug_tui` | `false` | Add the request's debug lines to the model's thinking output and error messages |
 
 ### Debug Logging
 
@@ -159,8 +155,6 @@ These settings are already `true` by default — you don't need to set them:
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
-| `session_recovery` | `true` | Auto-recover from errors |
-| `auto_update` | `true` | Keep plugin updated |
 | `switch_on_first_rate_limit` | `true` | Fast account switching |
 
 These settings are `false` by default:
@@ -168,7 +162,6 @@ These settings are `false` by default:
 | Setting | Default | What it does |
 |---------|---------|--------------|
 | `keep_thinking` | `false` | Preserve Claude thinking (may degrade stability) |
-| `auto_resume` | `false` | Auto-continue after recovery |
 
 ---
 
@@ -183,7 +176,6 @@ These settings are `false` by default:
 |--------|---------|-------------|
 | `empty_response_max_attempts` | `4` | Retries for empty API responses |
 | `empty_response_retry_delay_ms` | `2000` | Delay between retries |
-| `tool_id_recovery` | `true` | Fix mismatched tool IDs from context compaction |
 | `claude_tool_hardening` | `true` | Prevent tool parameter hallucination |
 | `max_rate_limit_wait_seconds` | `300` | Max wait time when rate limited (0=unlimited) |
 

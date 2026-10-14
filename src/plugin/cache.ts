@@ -1,69 +1,4 @@
-import { accessTokenExpired } from "./auth";
-import type { OAuthAuthDetails } from "./types";
 import { createHash } from "node:crypto";
-
-const authCache = new Map<string, OAuthAuthDetails>();
-
-/**
- * Produces a stable cache key from a refresh token string.
- */
-function normalizeRefreshKey(refresh?: string): string | undefined {
-  const key = refresh?.trim();
-  return key ? key : undefined;
-}
-
-/**
- * Returns a cached auth snapshot when available, favoring unexpired tokens.
- */
-export function resolveCachedAuth(auth: OAuthAuthDetails): OAuthAuthDetails {
-  const key = normalizeRefreshKey(auth.refresh);
-  if (!key) {
-    return auth;
-  }
-
-  const cached = authCache.get(key);
-  if (!cached) {
-    authCache.set(key, auth);
-    return auth;
-  }
-
-  if (!accessTokenExpired(auth)) {
-    authCache.set(key, auth);
-    return auth;
-  }
-
-  if (!accessTokenExpired(cached)) {
-    return cached;
-  }
-
-  authCache.set(key, auth);
-  return auth;
-}
-
-/**
- * Stores the latest auth snapshot keyed by refresh token.
- */
-export function storeCachedAuth(auth: OAuthAuthDetails): void {
-  const key = normalizeRefreshKey(auth.refresh);
-  if (!key) {
-    return;
-  }
-  authCache.set(key, auth);
-}
-
-/**
- * Clears cached auth globally or for a specific refresh token.
- */
-export function clearCachedAuth(refresh?: string): void {
-  if (!refresh) {
-    authCache.clear();
-    return;
-  }
-  const key = normalizeRefreshKey(refresh);
-  if (key) {
-    authCache.delete(key);
-  }
-}
 
 // ============================================================================
 // Thinking Signature Cache (for Claude multi-turn conversations)
@@ -153,10 +88,6 @@ export function initDiskSignatureCache(config: SignatureCacheConfig | undefined)
 /**
  * Get the disk cache instance (for testing/debugging).
  */
-export function getDiskSignatureCache(): SignatureCache | null {
-  return diskCache;
-}
-
 /**
  * Hashes text content into a stable, Unicode-safe key.
  *
@@ -293,11 +224,3 @@ export function clearSignatureCache(sessionId?: string): void {
     // since entries have TTL and will expire naturally.
   }
 }
-
-// ============================================================================
-// Disk-Persistent Signature Cache (re-export from cache/ folder)
-// ============================================================================
-
-// Re-export SignatureCache class and factory for direct use
-export { SignatureCache, createSignatureCache } from "./cache/signature-cache";
-export type { SignatureCacheConfig } from "./config";

@@ -155,7 +155,8 @@ describe("V2 provider transform", () => {
     const { registrations, cleanup } = await setup();
     const { provider, inventory, editor } = createProviderEditor({
       "gemini-2.5-flash": {},
-      "gemini-3.7-flash": { package: "@ai-sdk/google" },
+      "gemini-3.7-flash": {},
+      "gemini-3.8-flash": { package: "@ai-sdk/google" },
     });
 
     registrations.provider[0]!(editor);
@@ -164,7 +165,8 @@ describe("V2 provider transform", () => {
     // No accounts on disk: activation stays with OpenCode's own credentials.
     expect(provider.activation).toBe("auto");
     expect(inventory.has("gemini-2.5-flash")).toBe(false);
-    expect(inventory.get("gemini-3.7-flash")?.package).toBeUndefined();
+    expect(inventory.has("gemini-3.7-flash")).toBe(false);
+    expect(inventory.get("gemini-3.8-flash")?.package).toBeUndefined();
 
     const flash38 = inventory.get("antigravity-gemini-3.8-flash") as Record<string, any>;
     expect(flash38.name).toBe("Gemini 3.8 Flash (Antigravity)");
@@ -356,9 +358,138 @@ describe("V2 google_search tool", () => {
     expect(tool.name).toBe("google_search");
     expect(tool.input).toMatchObject({ type: "object", required: ["query"] });
 
-    // Not signed in: the core answers with guidance instead of searching.
+    // No account in the pool and no credential: guidance instead of a search.
     const result = await tool.execute({ query: "opencode" }, { signal: new AbortController().signal });
-    expect(result.content).toContain("Not authenticated with Antigravity");
+    expect(result.content).toContain("No Antigravity account");
+    await (cleanup as () => void)();
+  });
+});
+
+describe("auth from antigravity-accounts.json", () => {
+  const poolAccount = {
+    email: "pool@example.com",
+    refreshToken: "pool-refresh",
+    projectId: "pool-project",
+    managedProjectId: "pool-managed",
+    addedAt: 0,
+    lastUsed: 0,
+    enabled: true,
+  };
+
+  /** Fakes Google's token and Antigravity endpoints, recording every call. */
+  function stubGoogle() {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        calls.push({ url, init });
+        if (url === "https://oauth2.googleapis.com/token") {
+          return Response.json({ access_token: "pool-access", expires_in: 3600 });
+        }
+        if (url.includes(":fetchAvailableModels")) {
+          return Response.json({ models: { "gemini-3.8-flash-high": { displayName: "Gemini 3.8 Flash High" } } });
+        }
+        if (url.includes(":generateContent")) {
+          return Response.json({ response: { candidates: [{ content: { parts: [{ text: "found it" }] } }] } });
+        }
+        return new Response("{}", { status: 500 });
+      }),
+    );
+    return calls;
+  }
+
+  beforeEach(() => {
+    // The fake context has no OpenCode credential: the pool is the only source.
+    vi.mocked(storageModule.loadAccounts).mockResolvedValue({
+      version: 4,
+      accounts: [poolAccount],
+      activeIndex: 0,
+    } as never);
+  });
+
+  it("runs google_search as the pool's active account", async () => {
+    const calls = stubGoogle();
+    const { registrations, cleanup } = await setup();
+    const add = vi.fn();
+    registrations.tool[0]!({ add });
+
+    const result = await add.mock.calls[0]![0].execute(
+      { query: "opencode" },
+      { signal: new AbortController().signal },
+    );
+
+    const refresh = calls.find((call) => call.url === "https://oauth2.googleapis.com/token");
+    expect(String(refresh?.init?.body)).toContain("pool-refresh");
+    const search = calls.find((call) => call.url.includes(":generateContent"));
+    expect(new Headers(search?.init?.headers).get("Authorization")).toBe("Bearer pool-access");
+    expect(JSON.parse(String(search?.init?.body))).toMatchObject({
+      project: "pool-managed",
+      model: "gemini-3.8-flash-low",
+    });
+    expect(result.content).not.toContain("Error");
+    await (cleanup as () => void)();
+  });
+
+  it("prefers the pool over OpenCode's credential for google_search", async () => {
+    const calls = stubGoogle();
+    const { ctx, registrations, cleanup } = await setup();
+    ctx.integration.connection.active.mockResolvedValue({ id: "conn" } as never);
+    ctx.integration.connection.resolve.mockResolvedValue({
+      type: "oauth",
+      refresh: "credential-refresh",
+      access: "credential-access",
+      expires: Date.now() + 3_600_000,
+    } as never);
+    const add = vi.fn();
+    registrations.tool[0]!({ add });
+
+    await add.mock.calls[0]![0].execute({ query: "opencode" }, { signal: new AbortController().signal });
+
+    const search = calls.find((call) => call.url.includes(":generateContent"));
+    expect(new Headers(search?.init?.headers).get("Authorization")).toBe("Bearer pool-access");
+    expect(calls.some((call) => String(call.init?.body ?? "").includes("credential-refresh"))).toBe(false);
+    await (cleanup as () => void)();
+  });
+
+  it("discovers Antigravity models as the pool's active account", async () => {
+    const calls = stubGoogle();
+    const { ctx, cleanup } = await setup();
+
+    await vi.waitFor(() => expect(ctx.provider.reload).toHaveBeenCalled());
+    const discovery = calls.find((call) => call.url.includes(":fetchAvailableModels"));
+    expect(new Headers(discovery?.init?.headers).get("Authorization")).toBe("Bearer pool-access");
+    await (cleanup as () => void)();
+  });
+
+  it("reuses OpenCode's access token for discovery when it is the pool's active account", async () => {
+    const calls = stubGoogle();
+    const fake = createFakeContext();
+    fake.ctx.integration.connection.active.mockResolvedValue({ id: "conn" } as never);
+    fake.ctx.integration.connection.resolve.mockResolvedValue({
+      type: "oauth",
+      refresh: "pool-refresh",
+      access: "credential-access",
+      expires: Date.now() + 3_600_000,
+    } as never);
+    const cleanup = await plugin.setup(fake.ctx as never);
+
+    await vi.waitFor(() => expect(fake.ctx.provider.reload).toHaveBeenCalled());
+    const discovery = calls.find((call) => call.url.includes(":fetchAvailableModels"));
+    expect(new Headers(discovery?.init?.headers).get("Authorization")).toBe("Bearer credential-access");
+    expect(JSON.parse(String(discovery?.init?.body))).toMatchObject({ project: "pool-managed" });
+    expect(calls.some((call) => call.url === "https://oauth2.googleapis.com/token")).toBe(false);
+    await (cleanup as () => void)();
+  });
+
+  it("activates the provider from the pool alone", async () => {
+    stubGoogle();
+    const { registrations, cleanup } = await setup();
+    const { provider, editor } = createProviderEditor({});
+
+    registrations.provider[0]!(editor);
+
+    expect(provider.activation).toBe("enabled");
     await (cleanup as () => void)();
   });
 });

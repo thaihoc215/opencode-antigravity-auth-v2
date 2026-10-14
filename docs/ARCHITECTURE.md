@@ -2,7 +2,7 @@
 
 **Last Updated:** April 2026
 
-This document explains how the Antigravity plugin works: request/response flow, Claude-specific handling, and session recovery.
+This document explains how the Antigravity plugin works: request/response flow, Claude-specific handling, and error recovery.
 
 ---
 
@@ -25,19 +25,31 @@ The plugin intercepts requests to `generativelanguage.googleapis.com`, transform
 
 ## Module Structure
 
+The plugin has two layers:
+
+- **`src/v2/` — OpenCode V2 adapter.** The plugin entry (`{ id, setup(ctx) }`). It registers the provider, models, AI SDK, OAuth method and `google_search` tool through the V2 `ctx` APIs, and maps the V2 credential and connection APIs onto the core's `PluginClient` (`host.ts`). It also ships the account manager CLI (`cli.ts`).
+- **`src/plugin.ts` + `src/plugin/` — host-agnostic core.** Request transformation, account rotation, quota and OAuth. It exposes `auth.loader` (the Antigravity fetch), `auth.login` (interactive CLI login), `models()` and the `google_search` tool, and never imports OpenCode APIs directly.
+
 ```
 src/
-├── index.ts                 # Plugin exports
-├── plugin.ts                # Main entry, fetch interceptor
+├── index.ts                 # Package entry (re-exports src/v2/plugin.ts)
+├── plugin.ts                # Core: fetch interceptor, account rotation, login
 ├── constants.ts             # Endpoints, headers, config
 ├── antigravity/
 │   └── oauth.ts             # OAuth token exchange
+├── v2/
+│   ├── plugin.ts            # OpenCode V2 plugin entry
+│   ├── host.ts              # V2 ctx → core PluginClient / credential
+│   ├── models.ts            # Model definitions → V2 Model.Info
+│   ├── actions.ts           # "Action" question of the OAuth form
+│   ├── sdk.ts               # AI SDK factory loaded by OpenCode
+│   └── cli.ts               # Account manager CLI
 └── plugin/
     ├── auth.ts              # Token validation & refresh
     ├── request.ts           # Request transformation (main logic)
     ├── request-helpers.ts   # Schema cleaning, thinking filters
     ├── thinking-recovery.ts # Turn boundary detection, crash recovery
-    ├── recovery.ts          # Session recovery (tool_result_missing)
+    ├── recovery.ts          # Recoverable error classification
     ├── quota.ts             # Quota checking (API usage stats)
     ├── cache.ts             # Auth & signature caching
     ├── cache/
@@ -132,7 +144,7 @@ Claude API requires thinking before `tool_use` blocks. The plugin:
 
 ---
 
-## Session Recovery
+## Error Recovery
 
 ### Tool Result Missing Error
 
@@ -142,17 +154,7 @@ When a tool execution is interrupted (ESC, timeout, crash):
 Error: tool_use ids were found without tool_result blocks immediately after
 ```
 
-**Recovery flow** (`recovery.ts`):
-
-1. Detect error via `session.error` event
-2. Fetch session messages via `client.session.messages()`
-3. Extract `tool_use` IDs from failed message
-4. Inject synthetic `tool_result` blocks:
-   ```typescript
-   { type: "tool_result", tool_use_id: id, content: "Operation cancelled" }
-   ```
-5. Send via `client.session.prompt()`
-6. Optionally auto-resume with "continue"
+`detectErrorType()` (`recovery.ts`) classifies the error for the request pipeline. The 1.x plugin also repaired the session by editing OpenCode's on-disk message storage; OpenCode V2 does not use that storage, so the session-recovery hook was removed in 2.0. Retry, or `/undo` to before the interrupted tool call.
 
 ### Thinking Block Order Error
 
@@ -206,10 +208,10 @@ Contains OAuth refresh tokens - treat as sensitive.
 | Variable | Purpose |
 |----------|---------|
 | `OPENCODE_ANTIGRAVITY_DEBUG` | `1` or `2` for file debug logging |
-| `OPENCODE_ANTIGRAVITY_DEBUG_TUI` | `1` or `true` for TUI log panel debug output |
+| `OPENCODE_ANTIGRAVITY_DEBUG_TUI` | `1` or `true` to add the request's debug lines to the thinking output |
 | `OPENCODE_ANTIGRAVITY_QUIET` | Suppress toast notifications |
 
-`debug` and `debug_tui` are independent sinks: `debug` controls file logs, while `debug_tui` controls TUI logs.
+`debug` and `debug_tui` are independent: `debug` controls file logs, while `debug_tui` adds debug lines to the model's thinking output and error messages.
 
 ### Config File
 
@@ -217,10 +219,8 @@ Location: `~/.config/opencode/antigravity.json`
 
 ```json
 {
-  "session_recovery": true,
-  "auto_resume": true,
-  "resume_text": "continue",
-  "keep_thinking": false
+  "keep_thinking": false,
+  "debug": false
 }
 ```
 
@@ -257,8 +257,7 @@ Location: `~/.config/opencode/antigravity.json`
 
 | Function | Purpose |
 |----------|---------|
-| `handleSessionRecovery()` | Main recovery orchestration |
-| `createSessionRecoveryHook()` | Hook factory for plugin |
+| `detectErrorType()` | Classify recoverable Antigravity errors |
 
 ---
 
@@ -268,7 +267,7 @@ Location: `~/.config/opencode/antigravity.json`
 
 ```bash
 export OPENCODE_ANTIGRAVITY_DEBUG=2      # Verbose file logs
-export OPENCODE_ANTIGRAVITY_DEBUG_TUI=1  # TUI log panel output
+export OPENCODE_ANTIGRAVITY_DEBUG_TUI=1  # Debug lines in thinking output
 ```
 
 ### Log Location
@@ -280,7 +279,7 @@ export OPENCODE_ANTIGRAVITY_DEBUG_TUI=1  # TUI log panel output
 1. Is `isClaudeModel` true for Claude models?
 2. Are thinking blocks being stripped?
 3. Are tool schemas being cleaned?
-4. Is session recovery triggering?
+4. Is thinking recovery triggering?
 
 ---
 
@@ -290,7 +289,7 @@ export OPENCODE_ANTIGRAVITY_DEBUG_TUI=1  # TUI log panel output
 |-------|-------|----------|
 | `invalid signature` | Corrupted thinking block | Update plugin (strips all thinking) |
 | `Unknown field: const` | Schema uses `const` | Plugin auto-converts to `enum` |
-| `tool_use without tool_result` | Interrupted execution | Session recovery injects results |
+| `tool_use without tool_result` | Interrupted execution | Retry, or `/undo` to before the tool call |
 | `Expected thinking but found text` | Turn started without thinking | Thinking recovery closes turn |
 | `429 Too Many Requests` | Rate limited | Plugin auto-rotates accounts |
 

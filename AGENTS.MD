@@ -82,7 +82,8 @@ No linter or formatter is configured. Style is enforced by convention (see below
 
 ```
 src/
-├── plugin.ts                # Main entry, fetch interceptor
+├── v2/                      # OpenCode V2 adapter: plugin entry, ctx → core mapping, account CLI
+├── plugin.ts                # Host-agnostic core: fetch interceptor, account rotation, login
 ├── constants.ts             # Endpoints, headers, API config, system prompts
 ├── antigravity/oauth.ts     # OAuth token exchange
 └── plugin/
@@ -90,7 +91,7 @@ src/
     ├── request.ts           # Request transformation (core logic)
     ├── request-helpers.ts   # Schema cleaning, thinking filters
     ├── thinking-recovery.ts # Turn boundary detection
-    ├── recovery.ts          # Session recovery (tool_result_missing)
+    ├── recovery.ts          # Recoverable error classification
     ├── quota.ts             # Quota checking (API usage stats)
     ├── cache.ts             # Auth & signature caching
     ├── accounts.ts          # Multi-account management & storage
@@ -108,8 +109,8 @@ Plugin intercepts `fetch()` for `generativelanguage.googleapis.com`, transforms 
 ### 2. Claude Thinking Blocks
 ALL thinking blocks are stripped from outgoing requests for Claude models. Claude generates fresh thinking each turn. This eliminates signature validation errors.
 
-### 3. Session Recovery
-When tool execution is interrupted (ESC/timeout), the plugin injects synthetic `tool_result` blocks to recover the session without starting over.
+### 3. Error Recovery
+`detectErrorType()` classifies recoverable Antigravity errors (missing tool results, thinking block order) for the request pipeline; `thinking-recovery.ts` closes corrupted tool-loop turns. The 1.x session-recovery hook was removed: it edited OpenCode 1.x on-disk message storage, which V2 does not use.
 
 ### 4. Schema Sanitization
 Tool schemas are cleaned via allowlist. Unsupported fields (`const`, `$ref`, `$defs`) are removed or converted to Antigravity-compatible format.
@@ -123,10 +124,10 @@ Per-account device fingerprints stored in `antigravity-accounts.json`. Each fing
 ## Dependencies
 
 - `zod ^4` — schema validation (NOT zod v3)
-- `@opencode-ai/plugin` — OpenCode plugin interface
+- `@opencode/plugin` — OpenCode V2 plugin types (dev dependency)
+- `@ai-sdk/google` — AI SDK provider the plugin hands to OpenCode
 - `@openauthjs/openauth` — OAuth client
 - `proper-lockfile` — file locking for concurrent access
-- `xdg-basedir` — XDG directory resolution
 
 ## Testing
 

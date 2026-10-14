@@ -10,18 +10,9 @@ export interface V2ModelPatch {
   variants: Array<{ id: string; settings?: Record<string, unknown> }>;
 }
 
-const MODALITIES = ["text", "image", "pdf", "video", "audio"] as const;
-
 function modalityList(value: unknown): string[] | undefined {
-  if (Array.isArray(value)) {
-    return value.filter((entry): entry is string => typeof entry === "string");
-  }
-  // The core's normalized models carry V1 capability flags: { text: true, image: false, ... }
-  if (value && typeof value === "object") {
-    const flags = value as Record<string, unknown>;
-    return MODALITIES.filter((modality) => flags[modality] === true);
-  }
-  return undefined;
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((entry): entry is string => typeof entry === "string");
 }
 
 /**
@@ -45,7 +36,6 @@ export function toVariantSettings(variant: unknown): Record<string, unknown> | u
 export function toV2Model(id: string, definition: ProviderModel): V2ModelPatch {
   const limit = (definition.limit ?? {}) as { context?: number; input?: number; output?: number };
   const modalities = definition.modalities as { input?: unknown; output?: unknown } | undefined;
-  const capabilities = definition.capabilities as { input?: unknown; output?: unknown; toolcall?: unknown } | undefined;
   const variants = (definition.variants ?? {}) as Record<string, unknown>;
 
   return {
@@ -56,9 +46,9 @@ export function toV2Model(id: string, definition: ProviderModel): V2ModelPatch {
       output: limit.output ?? 0,
     },
     capabilities: {
-      tools: capabilities?.toolcall !== false,
-      input: modalityList(modalities?.input) ?? modalityList(capabilities?.input) ?? ["text"],
-      output: modalityList(modalities?.output) ?? modalityList(capabilities?.output) ?? ["text"],
+      tools: true,
+      input: modalityList(modalities?.input) ?? ["text"],
+      output: modalityList(modalities?.output) ?? ["text"],
     },
     variants: Object.entries(variants).map(([variantId, variant]) => {
       const settings = toVariantSettings(variant);

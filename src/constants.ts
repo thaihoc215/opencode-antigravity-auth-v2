@@ -75,9 +75,9 @@ export const ANTIGRAVITY_DEFAULT_PROJECT_ID = "rising-fact-p41fc";
  *
  * The backend gates its model catalog on the client version in the User-Agent:
  * a client reporting < 2.5.2 is served 24 models, >= 2.5.2 is served 27 —
- * the extra three being `gemini-3.7-flash-{low,medium,high}` (verified
- * 2026-08-17 against `v1internal:fetchAvailableModels`). Reporting a stale
- * version therefore silently hides models the account is entitled to.
+ * the extra three were the Gemini 3.7 Flash tiers (verified 2026-08-17 against
+ * `v1internal:fetchAvailableModels`). Reporting a stale version therefore
+ * silently hides models the account is entitled to.
  */
 export const ANTIGRAVITY_VERSION_FALLBACK = "2.8.1";
 let antigravityVersion = ANTIGRAVITY_VERSION_FALLBACK;
@@ -95,9 +95,6 @@ export function setAntigravityVersion(version: string): void {
   versionLocked = true;
 }
 
-/** @deprecated Use getAntigravityVersion() for runtime access. */
-export const ANTIGRAVITY_VERSION = ANTIGRAVITY_VERSION_FALLBACK;
-
 export function getAntigravityHeaders(): HeaderSet & { "Client-Metadata": string } {
   return {
     "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${getAntigravityVersion()} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`,
@@ -105,13 +102,6 @@ export function getAntigravityHeaders(): HeaderSet & { "Client-Metadata": string
     "Client-Metadata": `{"ideType":"ANTIGRAVITY","platform":"${process.platform === "win32" ? "WINDOWS" : "MACOS"}","pluginType":"GEMINI"}`,
   };
 }
-
-/** @deprecated Use getAntigravityHeaders() for runtime access. */
-export const ANTIGRAVITY_HEADERS = {
-  "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/${ANTIGRAVITY_VERSION} Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36`,
-  "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-  "Client-Metadata": `{"ideType":"ANTIGRAVITY","platform":"${process.platform === "win32" ? "WINDOWS" : "MACOS"}","pluginType":"GEMINI"}`,
-} as const;
 
 export const GEMINI_CLI_HEADERS = {
   "User-Agent": "google-api-nodejs-client/9.15.1",
@@ -233,20 +223,10 @@ export const MIN_SIGNATURE_LENGTH = 50;
 // ============================================================================
 
 /**
- * Model used for Google Search grounding requests.
- * Uses gemini-3.5-flash for fast, cost-effective search operations.
+ * Antigravity model id used for Google Search grounding requests: the lowest
+ * Gemini 3.8 Flash effort tier, for fast, cost-effective searches.
  */
-export const SEARCH_MODEL = "gemini-3.5-flash";
-
-/**
- * Thinking budget for deep search (more thorough analysis).
- */
-export const SEARCH_THINKING_BUDGET_DEEP = 16384;
-
-/**
- * Thinking budget for fast search (quick results).
- */
-export const SEARCH_THINKING_BUDGET_FAST = 4096;
+export const SEARCH_MODEL = "gemini-3.8-flash-low";
 
 /**
  * Timeout for search requests in milliseconds (60 seconds).

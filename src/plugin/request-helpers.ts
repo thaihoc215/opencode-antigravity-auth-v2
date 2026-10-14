@@ -1,6 +1,5 @@
 import { getKeepThinking } from "./config";
 import { createLogger } from "./logger";
-import { cacheSignature } from "./cache";
 import {
   EMPTY_SCHEMA_PLACEHOLDER_NAME,
   EMPTY_SCHEMA_PLACEHOLDER_DESCRIPTION,
@@ -1862,30 +1861,6 @@ export function isEmptyResponseBody(text: string): boolean {
 }
 
 /**
- * Checks if a streaming SSE response yielded zero meaningful chunks.
- * 
- * This is used after consuming a streaming response to determine if retry is needed.
- */
-export interface StreamingChunkCounter {
-  increment: () => void;
-  getCount: () => number;
-  hasContent: () => boolean;
-}
-
-export function createStreamingChunkCounter(): StreamingChunkCounter {
-  let count = 0;
-  let hasRealContent = false;
-
-  return {
-    increment: () => {
-      count++;
-    },
-    getCount: () => count,
-    hasContent: () => hasRealContent || count > 0,
-  };
-}
-
-/**
  * Checks if an SSE line contains meaningful content.
  * 
  * @param line - A single SSE line (e.g., "data: {...}")
@@ -2272,50 +2247,6 @@ export function fixToolResponseGrouping(contents: any[]): any[] {
   }
   
   return newContents;
-}
-
-/**
- * Checks if contents have any tool call/response ID mismatches.
- * 
- * @param contents - Array of Gemini-style content messages
- * @returns Object with mismatch details
- */
-export function detectToolIdMismatches(contents: any[]): {
-  hasMismatches: boolean;
-  expectedIds: string[];
-  foundIds: string[];
-  missingIds: string[];
-  orphanIds: string[];
-} {
-  const expectedIds: string[] = [];
-  const foundIds: string[] = [];
-  
-  for (const content of contents) {
-    const parts = content.parts || [];
-    
-    for (const part of parts) {
-      if (part?.functionCall?.id) {
-        expectedIds.push(part.functionCall.id);
-      }
-      if (part?.functionResponse?.id) {
-        foundIds.push(part.functionResponse.id);
-      }
-    }
-  }
-  
-  const expectedSet = new Set(expectedIds);
-  const foundSet = new Set(foundIds);
-  
-  const missingIds = expectedIds.filter(id => !foundSet.has(id));
-  const orphanIds = foundIds.filter(id => !expectedSet.has(id));
-  
-  return {
-    hasMismatches: missingIds.length > 0 || orphanIds.length > 0,
-    expectedIds,
-    foundIds,
-    missingIds,
-    orphanIds,
-  };
 }
 
 // ============================================================================

@@ -41,7 +41,7 @@ export const GEMINI_3_THINKING_LEVELS = [
  * - Claude non-thinking: claude-{model} (no -thinking suffix)
  */
 export const MODEL_ALIASES: Record<string, string> = {
-  "gemini-flash-latest": "gemini-3.5-flash",
+  "gemini-flash-latest": "gemini-3.8-flash",
 
   // Gemini 3 variants - for Gemini CLI only (tier stripped, thinkingLevel used)
   // For Antigravity, these are bypassed and full model name is kept
@@ -63,39 +63,20 @@ const TIER_REGEX = /-(minimal|low|medium|high)$/;
 const QUOTA_PREFIX_REGEX = /^antigravity-/i;
 const GEMINI_3_PRO_REGEX = /^gemini-3(?:\.\d+)?-pro/i;
 const GEMINI_3_FLASH_REGEX = /^gemini-3(?:\.\d+)?-flash/i;
-const GEMINI_35_FLASH_REGEX =
-  /^gemini-3\.5-flash(?:-(minimal|low|medium|high))?$/i;
-const GEMINI_35_FLASH_LOW_MODEL = "gemini-3.5-flash-low";
-const GEMINI_35_FLASH_HIGH_MODEL = "gemini-3-flash-agent";
 /**
  * Flash generations that carry the effort level in the Antigravity backend id
- * itself (`gemini-3.6-flash-medium`, `gemini-3.7-flash-high`, ...), unlike the
- * irregular 3.5 mapping above where low and medium share one id and high is
- * `gemini-3-flash-agent`.
+ * itself (`gemini-3.8-flash-low` / `-medium` / `-high`).
  *
- * `defaultLevel` is what an id with no tier suffix resolves to. These are this
- * plugin's choices, not Google's: Google documents `medium` as the default for
- * these generations, while 3.6 resolves to `low` here and 3.7/3.8 to `high`.
+ * `defaultLevel` is what an id with no tier suffix resolves to. It is this
+ * plugin's choice, not Google's: Google documents `medium` as the default, while
+ * an untiered 3.8 selection resolves to `high` here (maximum thinking, at a
+ * higher cost per request than the `low` default of the other Gemini entries).
  *
  * The Antigravity catalog serves no `-minimal` id for these generations, so a
  * requested `minimal` folds down to `low` — see `normalizeNoMinimalFlashTier`.
  */
 const EFFORT_IN_ID_FLASH_GENERATIONS = [
   {
-    regex: /^gemini-3\.6-flash(?:-(minimal|low|medium|high))?$/i,
-    baseModel: "gemini-3.6-flash",
-    defaultLevel: "low",
-  },
-  {
-    regex: /^gemini-3\.7-flash(?:-(minimal|low|medium|high))?$/i,
-    baseModel: "gemini-3.7-flash",
-    // Deliberate deviation from Google's documented `medium`: an untiered 3.7
-    // selection gets maximum thinking. That costs more per request than the
-    // `low` default every other Gemini entry here uses — chosen knowingly.
-    defaultLevel: "high",
-  },
-  {
-    // Catalog ids gemini-3.8-flash-{low,medium,high}; same default as 3.7.
     // The catalog also lists `gemini-3.8-flash-tiered`, which is not exposed.
     regex: /^gemini-3\.8-flash(?:-(minimal|low|medium|high))?$/i,
     baseModel: "gemini-3.8-flash",
@@ -114,7 +95,7 @@ function matchEffortInIdFlash(model: string) {
   return undefined;
 }
 /**
- * Dotted-minor Gemini generations (gemini-3.1, gemini-3.5, ...) use BARE model
+ * Dotted-minor Gemini generations (gemini-3.1, gemini-3.8, ...) use BARE model
  * names on the Gemini CLI backend, unlike the legacy 3.0 line (gemini-3-pro) which
  * uses a "-preview" suffix. Confirmed against the antigravity (`agy`) and `gemini`
  * CLIs, which ship `gemini-3.1-pro` (no `-preview`).
@@ -187,34 +168,15 @@ function isGemini3FlashModel(model: string): boolean {
 }
 
 /**
- * Cloud Code does not expose a bare `gemini-3.5-flash` backend id.
- * Antigravity/agy resolves the UI model to these advertised ids instead.
- */
-export function resolveAntigravityGemini35FlashBackendModel(
-  model: string,
-  thinkingLevel?: string,
-): string | undefined {
-  const modelWithoutQuota = model.replace(QUOTA_PREFIX_REGEX, "");
-  const match = modelWithoutQuota.match(GEMINI_35_FLASH_REGEX);
-  if (!match) {
-    return undefined;
-  }
-
-  const level = (thinkingLevel ?? match[1] ?? "low").toLowerCase();
-  return level === "high"
-    ? GEMINI_35_FLASH_HIGH_MODEL
-    : GEMINI_35_FLASH_LOW_MODEL;
-}
-
-/**
  * Resolves the Antigravity backend id for the Flash generations that carry the
- * effort level in the id itself (3.6, 3.7, 3.8 — see
- * `EFFORT_IN_ID_FLASH_GENERATIONS`), or `undefined` for anything else.
+ * effort level in the id itself (see `EFFORT_IN_ID_FLASH_GENERATIONS`), or
+ * `undefined` for anything else.
  *
- * Already-resolved ids round-trip unchanged, so calling this on the output of a
- * previous call is a no-op.
+ * Call this wherever a backend id must be (re-)derived after the effective
+ * thinking level is known: the effort lives in the id, so skipping it silently
+ * changes the effort. Already-resolved ids round-trip unchanged.
  */
-export function resolveAntigravityEffortInIdFlashBackendModel(
+export function resolveAntigravityGeminiFlashBackendModel(
   model: string,
   thinkingLevel?: string,
 ): string | undefined {
@@ -231,24 +193,6 @@ export function resolveAntigravityEffortInIdFlashBackendModel(
   ).toLowerCase();
   const effort = level === "high" || level === "medium" ? level : "low";
   return `${generation.baseModel}-${effort}`;
-}
-
-/**
- * Resolves the Antigravity backend id for any Gemini Flash generation that needs
- * one, or `undefined` when the model is not a Flash id with a special mapping.
- *
- * Call this rather than the per-generation helpers wherever a backend id must be
- * (re-)derived after the effective thinking level is known — the 3.6 mapping is
- * effort-sensitive in the id itself, so skipping it silently downgrades effort.
- */
-export function resolveAntigravityGeminiFlashBackendModel(
-  model: string,
-  thinkingLevel?: string,
-): string | undefined {
-  return (
-    resolveAntigravityGemini35FlashBackendModel(model, thinkingLevel) ??
-    resolveAntigravityEffortInIdFlashBackendModel(model, thinkingLevel)
-  );
 }
 
 /**
@@ -342,7 +286,7 @@ export function restoreGeminiMaxOutputTokens(
 /**
  * The thinkingLevel a Gemini 3 model runs at when the request names no tier.
  * `low` for everything except the effort-in-id Flash generations, which carry
- * their own `defaultLevel` — 3.6 Flash `low`, 3.7 and 3.8 Flash `high`.
+ * their own `defaultLevel` (3.8 Flash: `high`).
  */
 function defaultGemini3ThinkingLevel(model: string): string {
   const matched = matchEffortInIdFlash(model);
@@ -353,9 +297,8 @@ function defaultGemini3ThinkingLevel(model: string): string {
 }
 
 /**
- * Gemini 3.6, 3.7 and 3.8 Flash serve only low/medium/high, while 3.5 Flash also
- * serves `minimal`. A `minimal` request against those generations is folded to
- * `low` so that neither the backend id nor the `thinkingLevel` parameter carries
+ * Gemini 3.8 Flash serves only low/medium/high. A `minimal` request against the
+ * effort-in-id generations is folded to `low` so that neither the backend id nor the `thinkingLevel` parameter carries
  * a level the backend rejects.
  */
 function normalizeNoMinimalFlashTier(
@@ -425,7 +368,7 @@ export function resolveModelWithTier(
 
   // For Antigravity Gemini 3 Pro models without explicit tier, append default tier.
   // Antigravity API: gemini-3-pro requires tier suffix (gemini-3-pro-low/high)
-  //                  gemini-3.5-flash uses backend ids (gemini-3.5-flash-low / gemini-3-flash-agent)
+  //                  gemini-3.8-flash carries the effort in the id (gemini-3.8-flash-high)
   //                  other gemini-3-flash models use bare name + thinkingLevel param
   // Pro defaults to -low unless an explicit tier is provided
   const isGemini3Pro = isGemini3ProModel(modelWithoutQuota);
@@ -617,7 +560,7 @@ export function resolveModelForHeaderStyle(
     const stripped = modelWithTier.replace(/-(minimal|low|medium|high)$/i, "");
     // Translate Antigravity-only ids (e.g. `gemini-3.1-pro`) to the public Gemini
     // API equivalent (`gemini-3.1-pro-preview`). Falls back to the bare stripped
-    // name when no translation exists (covers `gemini-3.5-flash`, etc.).
+    // name when no translation exists (covers `gemini-3.8-flash`, etc.).
     const transformedModel =
       mapAntigravityModelToPublicApi(stripped) ?? stripped;
     return {
@@ -657,7 +600,7 @@ export function resolveModelForHeaderStyle(
       .replace(/-(minimal|low|medium|high)$/i, "");
 
     // Only the legacy 3.0 line takes a "-preview" suffix on the Gemini CLI backend.
-    // Dotted-minor generations (gemini-3.1+, gemini-3.5, ...) use bare names there.
+    // Dotted-minor generations (gemini-3.1+, gemini-3.8, ...) use bare names there.
     const hasPreviewSuffix = /-preview($|-)/i.test(transformedModel);
     const usesBareName = GEMINI_DOTTED_MINOR_REGEX.test(transformedModel);
     if (usesBareName && /-preview$/i.test(transformedModel)) {
@@ -713,9 +656,8 @@ export function resolveModelWithVariant(
       const baseModel = base.actualModel.replace(/-(low|medium|high)$/, "");
       actualModel = `${baseModel}-${level}`;
     } else if (isAntigravity) {
-      // Flash generations that encode effort in the backend id (3.6+) must move
-      // the id with the variant; 3.5 keeps its shared id and carries effort in
-      // the thinkingLevel param, so this is a no-op there.
+      // Flash generations that encode effort in the backend id must move the id
+      // with the variant.
       actualModel =
         resolveAntigravityGeminiFlashBackendModel(base.actualModel, level) ??
         actualModel;

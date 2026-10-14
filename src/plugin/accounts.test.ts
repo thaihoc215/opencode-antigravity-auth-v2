@@ -5,6 +5,17 @@ import type { AccountStorageV4 } from "./storage";
 import type { OAuthAuthDetails } from "./types";
 import * as storageModule from "./storage";
 
+// Promise.withResolvers is Node 22+; CI and `engines` target Node 20.
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // Mock storage to prevent test data from leaking to real config files
 vi.mock("./storage", async (importOriginal) => {
   const original = await importOriginal<typeof import("./storage")>();
@@ -1177,7 +1188,7 @@ describe("AccountManager", () => {
     });
 
     it("waits for an in-flight save before persisting a revoked-account removal", async () => {
-      const staleSave = Promise.withResolvers<void>();
+      const staleSave = deferred<void>();
       vi.mocked(storageModule.saveAccounts).mockImplementationOnce(async () => staleSave.promise);
       vi.mocked(storageModule.removeAccountFromStorage).mockClear();
       const stored: AccountStorageV4 = {

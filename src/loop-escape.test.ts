@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 // Mirror plugin.test.ts: the plugin module imports `tool` from the SDK. It is
 // only invoked inside createAntigravityPlugin (not at module load), but we mock
